@@ -110,12 +110,17 @@ async function ensureBound(tabId, url) {
     // The binding and the overlay both go into the isolated world. Only the console hook runs
     // in the page world, because that is where the page's console is. Each guards against
     // running twice, since this happens on every completed load.
-    await chrome.scripting.executeScript({
-      target,
-      func: (cfg) => { window.__ccConfig = cfg; },
-      args: [{ previewId: binding.previewId, origin: BRIDGE, repo: binding.repo, slack: binding.slack }],
-    });
-    await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['console-hook.js'] });
+    // The first two have nothing to do with each other; the overlay needs both, since it reads
+    // __ccConfig as it starts and listens for a hook that must already be there - the ordering
+    // rule `overlayTags` states in bridge/serve.mjs.
+    await Promise.all([
+      chrome.scripting.executeScript({
+        target,
+        func: (cfg) => { window.__ccConfig = cfg; },
+        args: [{ previewId: binding.previewId, origin: BRIDGE, repo: binding.repo, slack: binding.slack }],
+      }),
+      chrome.scripting.executeScript({ target, world: 'MAIN', files: ['console-hook.js'] }),
+    ]);
     await chrome.scripting.executeScript({ target, files: ['overlay.js'] });
   } catch {
     // chrome:// pages, the web store, a tab that navigated away mid-flight. Not an error.
@@ -159,18 +164,22 @@ chrome.storage.onChanged.addListener(async (c, area) => {
 async function paintBadge(tabId, origin) {
   await ready;
   const off = disabled.has(origin);
+  const b = bound.get(tabId);
   try {
-    await chrome.action.setBadgeText({ tabId, text: off ? 'off' : '' });
-    await chrome.action.setBadgeBackgroundColor({ tabId, color: '#6b6b76' });
-    const b = bound.get(tabId);
-    await chrome.action.setTitle({
-      tabId,
-      title: off
-        ? `Comments off for ${origin}`
-        : b || origin === BRIDGE
-          ? `Commenting into ${b?.repo || 'the set-up session'}`
-          : 'No Claude session is set up - run /preview in one',
-    });
+    // Independent of each other, and this runs on every navigation and every tab switch.
+    await Promise.all([
+      chrome.action.setBadgeText({ tabId, text: off ? 'off' : '' }),
+      // The colour is a constant and there is no badge to colour unless it says 'off'.
+      ...(off ? [chrome.action.setBadgeBackgroundColor({ tabId, color: '#6b6b76' })] : []),
+      chrome.action.setTitle({
+        tabId,
+        title: off
+          ? `Comments off for ${origin}`
+          : b || origin === BRIDGE
+            ? `Commenting into ${b?.repo || 'the set-up session'}`
+            : 'No Claude session is set up - run /preview in one',
+      }),
+    ]);
   } catch {}
 }
 
