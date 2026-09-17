@@ -102,3 +102,38 @@ test('a very long anchor is truncated rather than filling the channel', () => {
   assert.ok(out.length < 4000, `message stayed bounded (${out.length})`);
   assert.match(out, /… truncated\n```$/);
 });
+
+// The block is a fence, and the page it describes may well be showing one of its own.
+const fences = (s) => s.split('```').length - 1;
+const quoting = (selectedText) => slackMessage({ ...shared, anchor: { kind: 'selection', selectedText, selector: 'pre' } });
+
+test('a fence in the quoted text cannot close the block early', () => {
+  const out = quoting('```js\nconst a = 1;\n```');
+  assert.equal(fences(out), 2, 'the block opens once and closes once');
+  assert.ok(out.endsWith('\n```'), 'and the one that closes it is the last thing in the message');
+  assert.match(out, /const a = 1;/, 'the code itself still reads as it did');
+});
+
+test('longer runs of backticks are broken up as well', () => {
+  assert.equal(fences(quoting('````\nfour\n````')), 2);
+  assert.equal(fences(quoting('``````\nsix\n``````')), 2);
+});
+
+test('inline code inside the block is left exactly as it was', () => {
+  const out = quoting('call `foo()` or ``bar``');
+  assert.match(out, /call `foo\(\)` or ``bar``/);
+  assert.ok(!out.includes('\u200b'), 'nothing inserted where there was no run to break');
+});
+
+test('a fence typed into the comment cannot open one inside the quote', () => {
+  const out = slackMessage({ ...shared, comment: 'like this:\n```\nboom\n```' });
+  assert.equal(fences(out), 2);
+  assert.match(out, /^> like this:\n> /);
+  assert.match(out, /\n🔗 {2}<http:/, 'the link is still a link, not swallowed by a fence');
+});
+
+test('the session notification is plain text, so its backticks stay whole', () => {
+  const out = fmt({ ...base, anchor: { kind: 'selection', selectedText: '```js\nx\n```', selector: 'pre' } });
+  assert.match(out, /\| ```js/);
+  assert.ok(!out.includes('\u200b'));
+});
