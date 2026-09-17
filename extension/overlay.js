@@ -1495,13 +1495,20 @@
   const KEYS = new Set(['keydown', 'keypress', 'keyup']);
 
   for (const type of FREEZE) {
+    const isKey = KEYS.has(type);
     window.addEventListener(type, (e) => {
+      // The cheap question first. These 36 listeners sit on every page for the life of the tab,
+      // and pointermove/mouseover ask them hundreds of times a second on a page where the tool
+      // has never been opened - `isOurs` walking ancestors for each one. A key is the only kind
+      // of event with anything to do outside comment mode (the stop below), so nothing else has
+      // to find out whose target it is until the page is frozen.
+      if (!isKey && !inCommentMode()) return;
       if (isOurs(e.target)) {
         // Keys typed into the panel are the panel's. A keyboard event leaves the shadow root
         // retargeted to its host, which no page shortcut handler recognises as a text field, so
         // without this every letter of a comment also reached the page's shortcuts. Stopping it
         // here does not stop the character landing in the textarea - that is the default action.
-        if (KEYS.has(type)) e.stopPropagation();
+        if (isKey) e.stopPropagation();
         return;
       }
       // Reading a comment back outside comment mode leaves the page live for it.
