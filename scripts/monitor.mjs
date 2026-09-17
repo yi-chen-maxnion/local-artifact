@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import { ORIGIN, bridge, readToken, resolveSession, scratchDir } from '../lib/common.mjs';
 import { fmt } from '../lib/format.mjs';
+import { parseFrame } from '../lib/sse.mjs';
 
 const session = resolveSession();
 if (!session.key) {
@@ -100,13 +101,13 @@ async function connect() {
       while ((i = buf.indexOf('\n\n')) !== -1) {
         const frame = buf.slice(0, i);
         buf = buf.slice(i + 2);
-        const data = /^data: (.*)$/m.exec(frame);
-        if (!data) continue;
-        if (/^event: hello$/m.test(frame)) {
+        const { event, data } = parseFrame(frame);
+        if (data === undefined) continue; // a ping, or anything else without a payload
+        if (event === 'hello') {
           // A restarted daemon starts its numbering over. Without this reset every event it
           // sends would look like one already seen, and be dropped without a trace.
           try {
-            const hello = JSON.parse(data[1]);
+            const hello = JSON.parse(data);
             if (hello.instance && hello.instance !== instance) {
               instance = hello.instance;
               lastSeq = 0;
@@ -114,8 +115,13 @@ async function connect() {
           } catch {}
           continue;
         }
-        if (/^event: comment$/m.test(frame)) {
-          try { emit(JSON.parse(data[1])); } catch {}
+        if (event === 'comment') {
+          // Never silently: the bridge already answered 200 and the page already drew its pin,
+          // so a comment lost here is one the user was told had arrived. The frame itself is
+          // page data and stays out of the log.
+          try { emit(JSON.parse(data)); } catch (e) {
+            console.error(`ui-comments: dropped an unreadable comment frame: ${e.message}`);
+          }
         }
       }
     }
