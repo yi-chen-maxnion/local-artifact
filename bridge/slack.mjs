@@ -15,7 +15,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONFIG_DIR, PORT, ROOT, writeFileAtomic } from '../lib/common.mjs';
+import { CONFIG_DIR, PORT, ROOT, rateLimiter, writeFileAtomic } from '../lib/common.mjs';
 import { slackMessage } from '../lib/format.mjs';
 
 const API = process.env.LOCAL_ARTIFACT_SLACK_API || 'https://slack.com/api';
@@ -402,20 +402,13 @@ export async function destinations(q = '') {
 // ---------------------------------------------------------------- sharing
 
 let lastShare = null; // { ok, at, label, error } - what `/comments` reports
-const shares = [];
 
 /**
  * A page can ask the extension to share, and a page can be hostile. The panel's own guards -
  * a closed shadow root, trusted events only - are the real defence; this is the backstop that
  * keeps a bug on the other side of them from turning into a hundred messages in a channel.
  */
-export function allowShare() {
-  const now = Date.now();
-  while (shares.length && now - shares[0] > 60000) shares.shift();
-  if (shares.length >= SHARE_PER_MIN) return false;
-  shares.push(now);
-  return true;
-}
+export const allowShare = rateLimiter(SHARE_PER_MIN, 60000);
 
 async function upload(token, filename, buf, title, { alt } = {}) {
   const j = await api('files.getUploadURLExternal', {
