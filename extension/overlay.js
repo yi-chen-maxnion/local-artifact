@@ -56,13 +56,30 @@
     });
   }
 
-  /** Resolves to the worker's answer, `{ error }`, or null when nothing answered in time. */
+  /**
+   * Always resolves to an object carrying either the worker's answer or an `{ error, code }`:
+   * a timeout is a transport failure like a reloaded extension, so the transport names it once
+   * here rather than leaving three callers to write the same sentence about a null.
+   */
   function askExtension(type, payload, timeout = 4000) {
     return new Promise((resolve) => {
       const id = ++msgId;
-      const finish = (v) => { if (pending.delete(id)) resolve(v); };
-      pending.set(id, finish);
-      setTimeout(() => finish(null), timeout);
+      /**
+       * Every exit is this one, and it is where the promise above is kept. What arrives is not
+       * always the worker's: `respond()` with no argument and a port that closes both yield
+       * undefined, and in the page world the payload is whatever was posted at the window -
+       * including by the page itself, which shares that world. Anything that is not an object
+       * is not an answer, and callers read `.error` off whatever this resolves.
+       */
+      const finish = (v) => {
+        if (!pending.delete(id)) return;
+        resolve(v && typeof v === 'object' ? v : {
+          error: 'the extension sent an empty answer - refresh this page', code: 'extension_empty',
+        });
+      };
+      setTimeout(() => finish({
+        error: 'the extension did not answer - refresh this page', code: 'extension_timeout',
+      }), timeout);
       if (!isolated) {
         window.postMessage({ __cc: 'req', id, type, payload }, '*');
         return;
@@ -72,7 +89,9 @@
       try {
         chrome.runtime.sendMessage({ type, payload }, (res) => {
           const err = chrome.runtime.lastError;
-          finish(err ? { error: err.message } : res);
+          // A message-less `lastError` would otherwise be an answer with an empty `error`, which
+          // reads as success: a failure here always says something.
+          finish(err ? { error: err.message || 'the extension could not be reached - refresh this page' } : res);
         });
       } catch (err) {
         finish({ error: String(err?.message || err) });
@@ -189,7 +208,7 @@
     const wait = lastGrabAt + 550 - Date.now();
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     lastGrabAt = Date.now();
-    return (await askExtension('capture', {}, 8000)) || { error: 'no response from the extension' };
+    return askExtension('capture', {}, 8000);
   }
 
   /** A grabbed frame, ringed and encoded - or null, with the reason on the panel's screenshot line. */
@@ -2026,8 +2045,9 @@
         // Two file uploads and a post, over someone's office wi-fi: the panel waits for as long
         // as that takes rather than reporting a failure the message then contradicts.
         j = await askExtension('slackShare', { ...body, dest }, 60000);
-        if (!j) throw new Error('the extension did not answer - refresh this page');
-        if (j.error) throw new Error(j.error);
+        // Same as the comment path below: the code is the part of the worker's answer that is
+        // not prose, and an unreachable bridge has to be recognisable here too.
+        if (j.error) throw Object.assign(new Error(j.error), { code: j.code, status: j.status });
         // Nothing is pinned and nothing closes: the comment is in Slack, the session has not
         // been told, and what was typed is still here to send on with the next click.
         if (capturing) await veil(false);
@@ -2036,7 +2056,6 @@
       }
       if (isolated) {
         j = await askExtension('comment', body, 20000);
-        if (!j) throw new Error('the extension did not answer - refresh this page');
         // The worker answers a failure rather than throwing one, and `code` is the part of that
         // answer which is not prose. Carried onto the error so the catch can read it instead of
         // matching on a sentence the worker is free to reword.
@@ -2067,8 +2086,10 @@
       // something to read a stack trace about - say the one thing that fixes it instead.
       const offline = e.code === 'bridge_unreachable' || e.code === 'bridge_timeout'
         || /failed to fetch|networkerror|load failed|fetch failed/i.test(e.message || '');
+      // Named for the button that was pressed: a Slack share goes through the bridge too, and
+      // "then Send" would point at the wrong one.
       setStatus(offline
-        ? 'The bridge is not answering - run /preview again in the session, then Send.'
+        ? `The bridge is not answering - run /preview again in the session, then ${slack ? 'Slack' : 'Send'}.`
         : `Not sent - ${e.message}`);
     } finally {
       host.style.visibility = '';
@@ -2196,7 +2217,6 @@
     const j = await askExtension('slackDestinations', { q }, 15000);
     // A slower answer to an older query must not overwrite the one being read.
     if (mine !== destSeq || !el.dest.classList.contains('on')) return;
-    if (!j) return renderDest(null, 'the extension did not answer - refresh this page');
     if (j.error) return renderDest(null, j.error);
     if (!j.rows?.length) return renderDest(null, q ? 'nothing matches' : 'no channels found');
     renderDest(j.rows);
