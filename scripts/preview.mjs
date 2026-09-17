@@ -5,9 +5,8 @@
  * The previewId it gets back is the routing key: comments from that page reach this
  * session and no other. This is also the only place the bridge daemon gets started.
  */
-import { execFile } from 'node:child_process';
 import path from 'node:path';
-import { bridge, ensureDaemon, health, resolveSession, sleep } from '../lib/common.mjs';
+import { bridge, ensureDaemon, health, openInBrowser, resolveSession, sleep } from '../lib/common.mjs';
 
 const argv = process.argv.slice(2);
 const noOpen = argv.includes('--no-open');
@@ -39,12 +38,7 @@ try {
   const resolved = isUrl ? target : path.resolve(session.cwd, target);
   const { previewId, url, kind, external } = await bridge('/preview', { body: { key: session.key, target: resolved } });
 
-  if (!noOpen) {
-    // Chrome specifically: that is where the extension lives, and captureVisibleTab with it.
-    execFile('open', ['-a', 'Google Chrome', url], (err) => {
-      if (err) execFile('open', [url], () => {});
-    });
-  }
+  if (!noOpen) openInBrowser(url);
 
   // The monitor is armed by the host on skill invoke, not by us. If the arm trigger in
   // monitors.json ever stops matching this command's name, comments would vanish silently -

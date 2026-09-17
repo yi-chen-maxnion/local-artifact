@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
-import { ORIGIN, bridge, ensureDaemon, health, resolveSession, scratchDir, sleep } from '../lib/common.mjs';
+import { ORIGIN, bridge, ensureDaemon, health, openInBrowser, resolveSession, scratchDir, sleep } from '../lib/common.mjs';
 
 const cmd = process.argv[2] || 'status';
 const session = resolveSession();
@@ -41,11 +40,7 @@ async function slackCommand(sub) {
   }
 
   const { url } = await bridge('/slack/login', { body: {} });
-  // Chrome specifically, as /preview does: the person is already signed in to Slack there, and
-  // it is where the extension lives.
-  execFile('open', ['-a', 'Google Chrome', url], (err) => {
-    if (err) execFile('open', [url], () => {});
-  });
+  openInBrowser(url);
   console.log('slack      authorise in the browser window that just opened');
   console.log(`           ${url}`);
   // Long enough for a login that needs a password and a second factor, short enough to stay
