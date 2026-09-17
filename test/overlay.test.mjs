@@ -471,17 +471,65 @@ describe('elementsInRegion: what a drag caught, outermost only', () => {
     assert.deepEqual(elementsInRegion(REGION, []), []);
   });
 
-  // BUG. `opacity` does not inherit, so a child of an `opacity:0` container computes to 1. The
-  // container itself is filtered out, which stops shadowing its children in the outermost
-  // reduction - so a region dragged over a fully transparent card reports the card's children as
-  // if they were on the screen. `visibility:hidden` does inherit and does not have this problem.
-  test('a region over a transparent card reports nothing from inside it', { todo: 'opacity does not inherit, so children of an opacity:0 parent survive the filter' }, () => {
+  // `opacity` does not inherit, so a child of an `opacity:0` container computes to 1. Filtering
+  // the container out also stops it shadowing its children in the outermost reduction, so the
+  // children were promoted and the region reported a closed dropdown as if it were on the screen.
+  // `visibility:hidden` does inherit and never had this problem.
+  test('a region over a transparent card reports nothing from inside it', () => {
     const doc = setBody('<div id="ghost" style="opacity:0"><span id="kid">kid</span></div>');
     const hits = elementsInRegion(REGION, [
       { node: doc.getElementById('ghost'), r: box(1, 1, 10, 10) },
       { node: doc.getElementById('kid'), r: box(2, 2, 8, 8) },
     ]);
     assert.deepEqual(ids(hits), []);
+  });
+
+  // The transparent container is usually inside the box too, but it does not have to be: a
+  // faded-out toast wrapper can be wider than the drag, or not a candidate at all.
+  test('the transparent ancestor does not have to be one of the hits', () => {
+    const doc = setBody('<div id="ghost" style="opacity:0"><div id="mid"><span id="kid">kid</span></div></div>');
+    const hits = elementsInRegion(REGION, [
+      { node: doc.getElementById('ghost'), r: box(-50, -50, 400, 400) }, // sticks out of the box
+      { node: doc.getElementById('kid'), r: box(2, 2, 8, 8) }, // #mid is not even a candidate
+    ]);
+    assert.deepEqual(ids(hits), []);
+  });
+
+  test('half-transparent is still something to point at, for the children too', () => {
+    const doc = setBody('<div id="faint" style="opacity:0.5"><span id="kid">kid</span></div>'
+      + '<div id="nearly" style="opacity:0.001"><span id="kid2">kid2</span></div>');
+    const hits = elementsInRegion(REGION, [
+      { node: doc.getElementById('faint'), r: box(-50, -50, 400, 400) }, // outside, so #kid stands alone
+      { node: doc.getElementById('kid'), r: box(2, 2, 8, 8) },
+      { node: doc.getElementById('nearly'), r: box(20, 20, 400, 400) },
+      { node: doc.getElementById('kid2'), r: box(22, 22, 8, 8) },
+    ]);
+    assert.deepEqual(ids(hits), ['kid', 'kid2']);
+  });
+
+  // `visibility` is the one that inherits - and the one a child can turn back on. That child is
+  // genuinely on the screen, so it is genuinely an anchor.
+  test('a visible child of a hidden parent is visible', () => {
+    const doc = setBody('<div id="hid" style="visibility:hidden">'
+      + '<span id="shown" style="visibility:visible">here</span></div>');
+    const hits = elementsInRegion(REGION, [
+      { node: doc.getElementById('hid'), r: box(1, 1, 20, 20) },
+      { node: doc.getElementById('shown'), r: box(2, 2, 8, 8) },
+    ]);
+    assert.deepEqual(ids(hits), ['shown']);
+  });
+
+  // The ancestor walk is memoised per call; the cache must not leak an answer from one call into
+  // the next, because the page can change opacity between two mousemoves of the same drag.
+  test('a container that stops being transparent is measured again', () => {
+    const doc = setBody('<div id="ghost" style="opacity:0"><span id="kid">kid</span></div>');
+    const cand = [
+      { node: doc.getElementById('ghost'), r: box(-50, -50, 400, 400) },
+      { node: doc.getElementById('kid'), r: box(2, 2, 8, 8) },
+    ];
+    assert.deepEqual(ids(elementsInRegion(REGION, cand)), []);
+    doc.getElementById('ghost').style.opacity = '1';
+    assert.deepEqual(ids(elementsInRegion(REGION, cand)), ['kid']);
   });
 });
 

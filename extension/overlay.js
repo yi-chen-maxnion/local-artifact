@@ -366,11 +366,34 @@
    */
   function elementsInRegion(rect, candidates, limit = REGION_MAX_ELEMENTS) {
     const pad = 2;
+    /**
+     * `visibility` inherits, so a hidden subtree drops out on each node's own style. `opacity`
+     * does not: a child of an `opacity:0` container computes to 1, and losing the container to
+     * the filter promotes its children to outermost - a closed dropdown or a faded-out toast
+     * reported as if it were on the screen. So the answer is memoised per call: every ancestor
+     * is measured once for the whole region, not once per candidate, and since candidates come
+     * in document order the walk usually stops on the parent's cached answer. This runs on every
+     * mousemove of a drag, over everything inside the box.
+     */
+    const gone = new Map();
+    const faded = (el) => {
+      if (!el) return false;
+      let out = gone.get(el);
+      if (out === undefined) {
+        // Numerically: '0.001' is not '0' as a string either, and only a 0 is invisible.
+        out = parseFloat(getComputedStyle(el).opacity) === 0 || faded(el.parentElement);
+        gone.set(el, out);
+      }
+      return out;
+    };
     const hits = candidates.filter(({ node, r }) => {
       if (r.left < rect.x - pad || r.top < rect.y - pad) return false;
       if (r.right > rect.x + rect.w + pad || r.bottom > rect.y + rect.h + pad) return false;
       const cs = getComputedStyle(node); // only for what is inside, which is few
-      return cs.visibility !== 'hidden' && cs.opacity !== '0';
+      if (cs.visibility === 'hidden') return false;
+      const out = parseFloat(cs.opacity) === 0 || faded(node.parentElement);
+      gone.set(node, out); // the style is already in hand; descendants reuse it
+      return !out;
     }).map((c) => c.node);
 
     const set = new Set(hits);
