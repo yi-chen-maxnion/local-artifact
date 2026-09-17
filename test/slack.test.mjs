@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { register, startBridge } from './helpers.mjs';
+import { comment, listen, preview, register, startBridge } from './helpers.mjs';
 
 /**
  * A Slack that records what it was asked for. Every method the bridge calls answers here, so a
@@ -136,10 +136,9 @@ describe('slack', () => {
     fs.rmSync(config, { recursive: true, force: true });
   });
 
-  const preview = async (target = 'http://localhost:5173/') => {
-    const res = await bridge.request('/preview', { json: { key, target } });
-    return (await res.json()).previewId;
-  };
+  /** The id of a preview on this suite's session - the only part of it /slack/share needs. */
+  const opened = async (target = 'http://localhost:5173/') =>
+    (await preview(bridge, key, target)).previewId;
 
   /** The login the panel's Slack side needs: authorize, then the callback Slack would make. */
   const login = async () => {
@@ -284,7 +283,7 @@ describe('slack', () => {
         ...t, token: 'xoxp-stale', refreshToken: 'xoxe-1', expiresAt: Date.now() - 1000,
       }), { mode: 0o600 });
 
-      const previewId = await preview();
+      const previewId = await opened();
       assert.equal((await share(previewId)).status, 200);
 
       const refresh = slack.calls.find((c) => c.method === 'oauth.v2.access');
@@ -305,7 +304,7 @@ describe('slack', () => {
       }), { mode: 0o600 });
       slack.failNext('oauth.v2.access', 'invalid_refresh_token');
 
-      const res = await share(await preview());
+      const res = await share(await opened());
       assert.equal(res.status, 409);
       assert.match((await res.json()).error, /\/slack login/);
       await login(); // leave the suite connected for what follows
@@ -324,7 +323,7 @@ describe('slack', () => {
     };
 
     test('uploads the screenshot and hangs the whole message on it', async () => {
-      const previewId = await preview();
+      const previewId = await opened();
       const shot = `data:image/jpeg;base64,${Buffer.from('not really a jpeg').toString('base64')}`;
       const res = await share(previewId, { screenshot: shot });
       assert.equal(res.status, 200);
@@ -350,7 +349,7 @@ describe('slack', () => {
     });
 
     test('escapes what Slack would otherwise read as a mention', async () => {
-      const previewId = await preview();
+      const previewId = await opened();
       await share(previewId, { comment: 'ping <!channel> about <https://x> & co' });
       const { text } = posted();
       assert.match(text, /&lt;!channel&gt;/);
@@ -359,7 +358,7 @@ describe('slack', () => {
     });
 
     test('opens a DM first when the destination is a person', async () => {
-      const previewId = await preview();
+      const previewId = await opened();
       const res = await share(previewId, { dest: { id: 'U3', kind: 'user', label: '@bo' } });
       assert.equal(res.status, 200);
       assert.equal(slack.calls.find((c) => c.method === 'conversations.open').params.users, 'U3');
@@ -367,7 +366,7 @@ describe('slack', () => {
     });
 
     test('with no screenshot there is nothing to upload, so it posts a message', async () => {
-      const previewId = await preview();
+      const previewId = await opened();
       assert.equal((await share(previewId)).status, 200);
       assert.equal(slack.uploads.size, 0);
       const post = posted();
@@ -376,46 +375,46 @@ describe('slack', () => {
     });
 
     test('a comment is optional - the picture and the page can be the whole point', async () => {
-      const previewId = await preview();
+      const previewId = await opened();
       assert.equal((await share(previewId, { comment: '   ' })).status, 200);
       const { text } = posted();
       assert.match(text, /^🔗/, 'no empty quote line where the comment would have been');
     });
 
     test('tells the session nothing - that is what Send is for', async () => {
-      const previewId = await preview();
-      const events = await fetch(`${bridge.origin}/events?session=${key}`, {
-        headers: { 'x-cc-token': bridge.token },
-      });
-      const reader = events.body.getReader();
-      // The hello frame proves the stream is live before anything is posted.
-      assert.match(new TextDecoder().decode((await reader.read()).value), /event: hello/);
+      const previewId = await opened();
+      // A live monitor: the stream is what a shared comment would have travelled down, and it is
+      // also what makes the /comment at the end deliverable, so it stays open to the end.
+      const monitor = await listen(bridge, key);
+      const delivered = monitor.next();
 
       await share(previewId);
-      const next = await Promise.race([
-        reader.read().then(({ value }) => new TextDecoder().decode(value)),
+      const nothing = await Promise.race([
+        delivered,
         new Promise((r) => setTimeout(() => r('(nothing)'), 700)),
       ]);
-      assert.equal(next, '(nothing)', 'no comment event reaches the monitor');
-      await reader.cancel();
+      assert.equal(nothing, '(nothing)', 'no comment event reaches the monitor');
 
       // And the page's comment numbering is untouched: the next Send is still #1.
-      const sent = await bridge.request('/comment', {
-        token: null,
+      const sent = await comment(bridge, previewId, {
         headers: { origin: 'chrome-extension://abc' },
-        json: { previewId, comment: 'and to the session', page: { url: 'http://localhost:5173/a' } },
+        comment: 'and to the session',
+        page: { url: 'http://localhost:5173/a' },
       });
       assert.equal((await sent.json()).n, 1);
+      // The same waiting read, resolved by the Send rather than by the share.
+      assert.equal((await delivered).comment, 'and to the session');
+      await monitor.close();
     });
 
     test('is the extension\'s to ask for, and only for a page that is bound', async () => {
-      const previewId = await preview();
+      const previewId = await opened();
       assert.equal((await share(previewId, {}, { origin: 'https://deployed.example' })).status, 403);
       assert.equal((await share('deadbeef')).status, 404);
     });
 
     test('a Slack error comes back as the thing to do about it', async () => {
-      const previewId = await preview();
+      const previewId = await opened();
       slack.failNext('chat.postMessage', 'not_in_channel');
       const res = await share(previewId);
       assert.equal(res.status, 502);
@@ -427,7 +426,7 @@ describe('slack', () => {
     });
 
     test('stops runaway posting', async () => {
-      const previewId = await preview();
+      const previewId = await opened();
       const codes = [];
       for (let i = 0; i < 12; i++) codes.push((await share(previewId)).status);
       assert.ok(codes.includes(429), 'the eleventh post in a minute is refused');
@@ -487,12 +486,12 @@ describe('a refresh Slack granted but the disk would not keep', () => {
   });
 
   const share = async () => {
-    const res = await bridge.request('/preview', { json: { key, target: 'http://localhost:5173/' } });
+    const { previewId } = await preview(bridge, key, 'http://localhost:5173/');
     return bridge.request('/slack/share', {
       token: null,
       headers: { origin: 'chrome-extension://abc' },
       json: {
-        previewId: (await res.json()).previewId,
+        previewId,
         comment: 'make it blue',
         dest: { id: 'C1', kind: 'channel', label: '#design-review' },
         page: { url: 'http://localhost:5173/a' },

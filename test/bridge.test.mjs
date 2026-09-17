@@ -2,8 +2,7 @@ import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseFrame } from '../lib/sse.mjs';
-import { register, startBridge } from './helpers.mjs';
+import { comment, listen, preview, register, startBridge } from './helpers.mjs';
 
 describe('bridge', () => {
   let bridge;
@@ -16,12 +15,6 @@ describe('bridge', () => {
     files = fs.mkdtempSync(path.join(bridge.dir, 'files-'));
   });
   after(() => bridge.stop());
-
-  const preview = async (target) => {
-    const res = await bridge.request('/preview', { json: { key, target } });
-    assert.equal(res.status, 200);
-    return res.json();
-  };
 
   describe('control routes', () => {
     test('refuse a caller without the token', async () => {
@@ -90,15 +83,15 @@ describe('bridge', () => {
     test('the same file keeps its preview id', async () => {
       const file = path.join(files, 'page.html');
       fs.writeFileSync(file, '<html><body><h1>hi</h1></body></html>');
-      const a = await preview(file);
-      const b = await preview(file);
+      const a = await preview(bridge, key, file);
+      const b = await preview(bridge, key, file);
       assert.equal(a.previewId, b.previewId);
     });
 
     test('HTML gets both overlay tags, with the repo, before the last </body>', async () => {
       const file = path.join(files, 'inline.html');
       fs.writeFileSync(file, '<html><body><script>const s = "</body>";</script>__ORIGIN__</body></html>');
-      const { previewId } = await preview(file);
+      const { previewId } = await preview(bridge, key, file);
       const body = await (await bridge.request(`/p/${previewId}/`)).text();
       assert.match(body, /const s = "<\/body>";<\/script>__ORIGIN__<script src="\/console-hook\.js">/);
       assert.match(body, new RegExp(`data-cc-preview="${previewId}" data-cc-origin="${bridge.origin}" data-cc-repo="repo"`));
@@ -107,7 +100,7 @@ describe('bridge', () => {
     test('a PDF whose name has spaces and CJK is served', async () => {
       const name = '報告 final.pdf';
       fs.writeFileSync(path.join(files, name), '%PDF-1.4 test');
-      const { previewId } = await preview(path.join(files, name));
+      const { previewId } = await preview(bridge, key, path.join(files, name));
       const page = await (await bridge.request(`/p/${previewId}/`)).text();
       assert.match(page, /data-cc-repo="repo"/);
       const src = /src="\.\/(__target\/[^"]+)"/.exec(page)[1];
@@ -119,20 +112,20 @@ describe('bridge', () => {
     test('a plain text file shows its text', async () => {
       const file = path.join(files, 'notes.txt');
       fs.writeFileSync(file, 'line <one>');
-      const { previewId, kind } = await preview(file);
+      const { previewId, kind } = await preview(bridge, key, file);
       assert.equal(kind, 'text');
       assert.match(await (await bridge.request(`/p/${previewId}/`)).text(), /line &lt;one&gt;/);
     });
 
     test('an id without its trailing slash is redirected to it', async () => {
-      const { previewId } = await preview(path.join(files, 'notes.txt'));
+      const { previewId } = await preview(bridge, key, path.join(files, 'notes.txt'));
       const res = await bridge.request(`/p/${previewId}`);
       assert.equal(res.status, 301);
       assert.equal(res.headers.get('location'), `/p/${previewId}/`);
     });
 
     test('a path cannot climb out of the preview root', async () => {
-      const { previewId } = await preview(path.join(files, 'notes.txt'));
+      const { previewId } = await preview(bridge, key, path.join(files, 'notes.txt'));
       for (const rel of ['..%2f..%2fetc%2fpasswd', '%2e%2e/%2e%2e/secret']) {
         assert.equal((await bridge.request(`/p/${previewId}/${rel}`)).status, 404, rel);
       }
@@ -140,16 +133,20 @@ describe('bridge', () => {
   });
 
   describe('/comment', () => {
-    const comment = (previewId, extra = {}, headers = {}) => bridge.request('/comment', {
-      token: null, headers,
-      json: { previewId, comment: 'make it blue', page: { url: 'http://localhost:5173/a?x=1' }, anchor: { kind: 'element' }, ...extra },
-    });
+    let monitor;
+
+    // Every 200 below is a comment that has to be deliverable, so the session needs someone on
+    // its stream. Without this these tests only passed while the daemon was young enough for
+    // `listening()` to wave them through - a race with how long the file above takes to run.
+    before(async () => { monitor = await listen(bridge, key); });
+    after(() => monitor.close());
 
     test('numbers per page and never below what the page already shows', async () => {
-      const { previewId } = await preview('http://localhost:5173/');
-      assert.equal((await (await comment(previewId)).json()).n, 1);
-      assert.equal((await (await comment(previewId, { after: 7 })).json()).n, 8);
-      assert.equal((await (await comment(previewId, { page: { url: 'http://localhost:5173/b' } })).json()).n, 1);
+      const { previewId } = await preview(bridge, key, 'http://localhost:5173/');
+      assert.equal((await (await comment(bridge, previewId)).json()).n, 1);
+      assert.equal((await (await comment(bridge, previewId, { after: 7 })).json()).n, 8);
+      const other = { page: { url: 'http://localhost:5173/b' } };
+      assert.equal((await (await comment(bridge, previewId, other)).json()).n, 1);
     });
 
     test('an automatically bound origin accepts the extension, not the page itself', async () => {
@@ -157,14 +154,16 @@ describe('bridge', () => {
       const res = await bridge.request(`/resolve?origin=${encodeURIComponent(origin)}`, { token: null });
       const { previewId } = await res.json();
       assert.ok(previewId);
-      assert.equal((await comment(previewId, {}, { origin })).status, 403);
-      assert.equal((await comment(previewId, {}, { origin: 'chrome-extension://abc' })).status, 200);
+      assert.equal((await comment(bridge, previewId, { headers: { origin } })).status, 403);
+      const ext = { headers: { origin: 'chrome-extension://abc' } };
+      assert.equal((await comment(bridge, previewId, ext)).status, 200);
     });
 
     test('an origin opened with /preview accepts the page, for the bookmarklet', async () => {
-      const { previewId } = await preview('http://localhost:8123/');
-      assert.equal((await comment(previewId, {}, { origin: 'http://localhost:8123' })).status, 200);
-      assert.equal((await comment(previewId, {}, { origin: 'http://localhost:9999' })).status, 403);
+      const { previewId } = await preview(bridge, key, 'http://localhost:8123/');
+      const page = (origin) => comment(bridge, previewId, { headers: { origin } });
+      assert.equal((await page('http://localhost:8123')).status, 200);
+      assert.equal((await page('http://localhost:9999')).status, 403);
     });
   });
 
@@ -185,24 +184,30 @@ describe('bridge', () => {
 });
 
 test('previews, counters and seq survive a daemon restart', async () => {
+  const page = { url: 'http://localhost:7000/' };
   const first = await startBridge();
   const key = await register(first);
-  const res = await first.request('/preview', { json: { key, target: 'http://localhost:7000/' } });
-  const { previewId } = await res.json();
-  const sent = await first.request('/comment', {
-    token: null, json: { previewId, comment: 'one', page: { url: 'http://localhost:7000/' } },
-  });
-  assert.equal((await sent.json()).n, 1);
+  // The session's monitor, on the daemon that is about to go away.
+  const monitor = await listen(first, key);
+  const { previewId } = await preview(first, key, 'http://localhost:7000/');
+  assert.equal((await (await comment(first, previewId, { comment: 'one', page })).json()).n, 1);
+  await monitor.close();
   await first.stop();
 
   const second = await startBridge({ tmp: first.dir, port: first.port });
   try {
     await register(second, key);
-    const again = await second.request('/comment', {
-      token: null, json: { previewId, comment: 'two', page: { url: 'http://localhost:7000/' } },
-    });
-    assert.equal(again.status, 200);
-    assert.equal((await again.json()).n, 2);
+    // What a restart looks like from the session's side: the monitor comes back and reopens its
+    // stream on the new daemon. That reconnection, not the new daemon's youth, is what makes the
+    // second comment deliverable - the point of the test is the numbering that survived.
+    const reconnected = await listen(second, key);
+    try {
+      const again = await comment(second, previewId, { comment: 'two', page });
+      assert.equal(again.status, 200);
+      assert.equal((await again.json()).n, 2);
+    } finally {
+      await reconnected.close();
+    }
   } finally {
     await second.stop();
   }
@@ -229,9 +234,7 @@ describe('an origin two sessions have opened', () => {
   // Claims are ordered by the millisecond they were made, so two of them need different ones.
   const claim = async (key) => {
     await new Promise((r) => setTimeout(r, 2));
-    const res = await bridge.request('/preview', { json: { key, target: `${site}/` } });
-    assert.equal(res.status, 200);
-    return (await res.json()).previewId;
+    return (await preview(bridge, key, `${site}/`)).previewId;
   };
 
   const resolved = async () => {
@@ -263,35 +266,29 @@ describe('a session with nothing listening', () => {
   let key;
 
   before(async () => {
+    // Named rather than left to the helper's default, because the window is what this is about.
     bridge = await startBridge({ env: { LOCAL_ARTIFACT_LISTEN_GRACE_MS: '0' } });
     key = await register(bridge);
   });
   after(() => bridge.stop());
 
-  const comment = (previewId) => bridge.request('/comment', {
-    token: null,
-    json: { previewId, comment: 'anyone there?', page: { url: 'http://localhost:7100/a' } },
+  const ask = (previewId) => comment(bridge, previewId, {
+    comment: 'anyone there?', page: { url: 'http://localhost:7100/a' },
   });
 
   test('refuses the comment instead of accepting one that goes nowhere', async () => {
-    const res = await bridge.request('/preview', { json: { key, target: 'http://localhost:7100/' } });
-    const { previewId } = await res.json();
+    const { previewId } = await preview(bridge, key, 'http://localhost:7100/');
 
-    const nobody = await comment(previewId);
+    const nobody = await ask(previewId);
     assert.equal(nobody.status, 409);
     assert.match((await nobody.json()).error, /no Claude session is listening/);
 
     // With a monitor on the stream, the same comment goes through - and arrives.
-    const events = await fetch(`${bridge.origin}/events?session=${key}`, {
-      headers: { 'x-cc-token': bridge.token },
-    });
-    const reader = events.body.getReader();
-    assert.match(new TextDecoder().decode((await reader.read()).value), /event: hello/);
-
-    const sent = await comment(previewId);
+    const monitor = await listen(bridge, key);
+    const sent = await ask(previewId);
     assert.equal(sent.status, 200);
-    assert.match(new TextDecoder().decode((await reader.read()).value), /anyone there\?/);
-    await reader.cancel();
+    assert.equal((await monitor.next()).comment, 'anyone there?');
+    await monitor.close();
   });
 });
 
@@ -307,57 +304,26 @@ describe('a screenshot the bridge cannot save', () => {
     + 'AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
   let bridge;
   let key;
-  let reader;
+  let monitor;
   let previewId;
-  const dec = new TextDecoder();
-  let buf = '';
 
   before(async () => {
-    // No grace window: a listener of our own is what makes the comment deliverable, and it is
-    // also how the delivered event is read back.
-    bridge = await startBridge({ env: { LOCAL_ARTIFACT_LISTEN_GRACE_MS: '0' } });
+    bridge = await startBridge();
     key = await register(bridge);
-    const events = await fetch(`${bridge.origin}/events?session=${key}`, {
-      headers: { 'x-cc-token': bridge.token },
-    });
-    reader = events.body.getReader();
-    // Into the same buffer `delivered` reads from, so nothing that shared the chunk is dropped.
-    buf += dec.decode((await reader.read()).value, { stream: true });
-    assert.ok(buf.includes('event: hello'), buf);
-    const res = await bridge.request('/preview', { json: { key, target: 'http://localhost:7300/' } });
-    previewId = (await res.json()).previewId;
+    // A listener of our own is what makes the comment deliverable - no test daemon has a grace
+    // window - and it is also how the delivered event is read back.
+    monitor = await listen(bridge, key);
+    ({ previewId } = await preview(bridge, key, 'http://localhost:7300/'));
   });
   after(async () => {
-    await reader.cancel();
+    await monitor.close();
     await bridge.stop();
   });
 
-  const send = (extra = {}) => bridge.request('/comment', {
-    token: null,
-    json: {
-      previewId, comment: 'look at this', page: { url: 'http://localhost:7300/a' },
-      screenshot: PNG, ...extra,
-    },
+  const send = (fields = {}) => comment(bridge, previewId, {
+    comment: 'look at this', page: { url: 'http://localhost:7300/a' }, screenshot: PNG, ...fields,
   });
-
-  /**
-   * The next delivered comment event, as the session's monitor would receive it: frames buffered
-   * across reads and parsed the way scripts/monitor.mjs parses them. A regex over one chunk is
-   * what `lib/sse.mjs` exists to replace - `.` stops at the U+2028 that JSON.stringify emits raw.
-   */
-  const delivered = async () => {
-    for (;;) {
-      let i;
-      while ((i = buf.indexOf('\n\n')) !== -1) {
-        const { event, data } = parseFrame(buf.slice(0, i));
-        buf = buf.slice(i + 2);
-        if (event === 'comment' && data !== undefined) return JSON.parse(data);
-      }
-      const { value, done } = await reader.read();
-      if (done) throw new Error('the stream ended');
-      buf += dec.decode(value, { stream: true });
-    }
-  };
+  const delivered = () => monitor.next();
 
   test('is still delivered, with the reason in place of the path', async () => {
     // The control: nothing sabotaged, so the same request writes a real file.
@@ -410,44 +376,20 @@ describe('more comments in a minute than a session will take', () => {
   /** A registered session with a real monitor on its stream and a preview of its own. */
   const session = async (key, target) => {
     await register(bridge, key);
-    const events = await fetch(`${bridge.origin}/events?session=${key}`, {
-      headers: { 'x-cc-token': bridge.token },
-    });
-    const reader = events.body.getReader();
-    const dec = new TextDecoder();
-    let buf = dec.decode((await reader.read()).value, { stream: true });
-    assert.ok(buf.includes('event: hello'), buf);
-    const res = await bridge.request('/preview', { json: { key, target } });
-    const { previewId } = await res.json();
+    const monitor = await listen(bridge, key);
+    const { previewId } = await preview(bridge, key, target);
     return {
       previewId,
-      send: (comment) => bridge.request('/comment', {
-        token: null, json: { previewId, comment, page: { url: `${target}a` } },
-      }),
-      /** The next delivered comment, frames buffered and parsed as scripts/monitor.mjs parses them. */
-      next: async () => {
-        for (;;) {
-          let i;
-          while ((i = buf.indexOf('\n\n')) !== -1) {
-            const { event, data } = parseFrame(buf.slice(0, i));
-            buf = buf.slice(i + 2);
-            if (event === 'comment' && data !== undefined) return JSON.parse(data);
-          }
-          const { value, done } = await reader.read();
-          if (done) throw new Error('the stream ended');
-          buf += dec.decode(value, { stream: true });
-        }
-      },
-      cancel: () => reader.cancel(),
+      send: (text) => comment(bridge, previewId, { comment: text, page: { url: `${target}a` } }),
+      next: monitor.next,
+      cancel: monitor.close,
     };
   };
 
   before(async () => {
-    // Two a minute rather than thirty, so the test does not have to send thirty-one; and no grace
-    // window, so each session's own stream is what makes its comments deliverable.
-    bridge = await startBridge({
-      env: { LOCAL_ARTIFACT_COMMENT_RATE_MAX: '2', LOCAL_ARTIFACT_LISTEN_GRACE_MS: '0' },
-    });
+    // Two a minute rather than thirty, so the test does not have to send thirty-one. Each
+    // session's own stream is what makes its comments deliverable, as on any test daemon.
+    bridge = await startBridge({ env: { LOCAL_ARTIFACT_COMMENT_RATE_MAX: '2' } });
     a = await session(`p${process.pid}`, 'http://localhost:7400/');
     // A second session: as above, the key only has to be a valid one over a live pid.
     b = await session(`p${process.pid}1`, 'http://localhost:7401/');
@@ -493,6 +435,8 @@ describe('a monitor between streams', () => {
   let key;
 
   before(async () => {
+    // The one place that wants a window: named here rather than left to the helper's default,
+    // which is none. Raising it would buy margin only by lengthening the sleep below by as much.
     bridge = await startBridge({ env: { LOCAL_ARTIFACT_LISTEN_GRACE_MS: String(GRACE) } });
     key = await register(bridge);
   });
@@ -505,11 +449,16 @@ describe('a monitor between streams', () => {
   };
 
   test('a comment is still taken after it re-registers', async () => {
-    const res = await bridge.request('/preview', { json: { key, target: 'http://localhost:7200/' } });
-    const { previewId } = await res.json();
+    const { previewId } = await preview(bridge, key, 'http://localhost:7200/');
     // Past the floor a just-started daemon gets, so only lastStream can hold the window open.
     await new Promise((r) => setTimeout(r, GRACE + 50));
+    // The first request after an idle gap costs far more than a warm one on this loopback -
+    // enough, measured, to eat a second of the window. Spend it here, where the clock the test
+    // cares about has not started: that clock starts when the stream below closes.
+    await clients();
 
+    // Opened by hand rather than with `listen`: this is the one test about *when* the stream
+    // closes, so it wants the abort in its own hand, and it never reads a comment off it.
     const stream = new AbortController();
     const events = await fetch(`${bridge.origin}/events?session=${key}`, {
       headers: { 'x-cc-token': bridge.token }, signal: stream.signal,
@@ -523,9 +472,8 @@ describe('a monitor between streams', () => {
     assert.equal(await clients(), 0); // the close is what writes lastStream
 
     await register(bridge, key); // what a monitor does before reopening the stream
-    const sent = await bridge.request('/comment', {
-      token: null,
-      json: { previewId, comment: 'still here', page: { url: 'http://localhost:7200/a' } },
+    const sent = await comment(bridge, previewId, {
+      comment: 'still here', page: { url: 'http://localhost:7200/a' },
     });
     assert.equal(sent.status, 200, await sent.text());
   });

@@ -1,9 +1,11 @@
+import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseFrame } from '../lib/sse.mjs';
 
 const ROOT = path.resolve(fileURLToPath(import.meta.url), '../..');
 
@@ -38,6 +40,13 @@ export async function startBridge({ tmp, port: fixedPort, env = {} } = {}) {
       LOCAL_ARTIFACT_PORT: String(port),
       TMPDIR: dir,
       LOCAL_ARTIFACT_CONFIG_DIR: configDir,
+      // Born already past its startup grace window. `listening()` in bridge/server.mjs lets a
+      // daemon take comments for its first LOCAL_ARTIFACT_LISTEN_GRACE_MS with nobody attached,
+      // on the grounds that the monitors are still reconnecting - which quietly made every test
+      // daemon's youth the reason a /comment returned 200. A test that wants a comment delivered
+      // attaches a real monitor with `listen`; a test about the window itself names its own value
+      // in `env`, which comes last.
+      LOCAL_ARTIFACT_LISTEN_GRACE_MS: '0',
       ...env,
     },
     stdio: ['ignore', 'ignore', 'inherit'],
@@ -78,4 +87,69 @@ export async function register(bridge, key = `p${process.pid}`) {
   const res = await bridge.request('/register', { json: { key, pid: process.pid, cwd: '/tmp/repo', repo: 'repo' } });
   if (!res.ok) throw new Error(`register ${res.status}`);
   return key;
+}
+
+/** Opens `target` for `key` and hands back the answer - `{ previewId, url, kind, ... }`. */
+export async function preview(bridge, key, target) {
+  const res = await bridge.request('/preview', { json: { key, target } });
+  assert.equal(res.status, 200);
+  return res.json();
+}
+
+/**
+ * A comment the way a page sends one: no control token, and a body a real overlay could have
+ * produced. Everything in `fields` goes into that body - `after`, `page`, `screenshot`, `capture`
+ * - except `headers`, which is lifted out for the `origin` these tests keep varying.
+ *
+ * The raw Response, not the parsed body: what most of these tests assert on is the status, and
+ * several of them want a failure.
+ */
+export function comment(bridge, previewId, { headers, ...fields } = {}) {
+  return bridge.request('/comment', {
+    token: null,
+    headers,
+    json: {
+      previewId,
+      comment: 'make it blue',
+      page: { url: 'http://localhost:5173/a?x=1' },
+      ...fields,
+    },
+  });
+}
+
+/**
+ * A monitor on this session's stream. Attaching one is what makes a comment deliverable at all -
+ * see `listening()` in bridge/server.mjs - so a test that expects /comment to be taken needs one.
+ *
+ * `next()` reads the way scripts/monitor.mjs reads: frames buffered across reads, split on the
+ * blank line, parsed by `parseFrame`. Never by a regex - `.` stops at the U+2028 that
+ * JSON.stringify emits raw, which is the whole reason lib/sse.mjs exists.
+ */
+export async function listen(bridge, key) {
+  const events = await fetch(`${bridge.origin}/events?session=${key}`, {
+    headers: { 'x-cc-token': bridge.token },
+  });
+  const reader = events.body.getReader();
+  const dec = new TextDecoder();
+  // Into the same buffer `next` reads from, so nothing that shared the hello frame's chunk is lost.
+  let buf = dec.decode((await reader.read()).value, { stream: true });
+  assert.ok(buf.includes('event: hello'), buf);
+
+  return {
+    /** The next delivered comment event, as the session's monitor would receive it. */
+    next: async () => {
+      for (;;) {
+        let i;
+        while ((i = buf.indexOf('\n\n')) !== -1) {
+          const { event, data } = parseFrame(buf.slice(0, i));
+          buf = buf.slice(i + 2);
+          if (event === 'comment' && data !== undefined) return JSON.parse(data);
+        }
+        const { value, done } = await reader.read();
+        if (done) throw new Error('the stream ended');
+        buf += dec.decode(value, { stream: true });
+      }
+    },
+    close: () => reader.cancel(),
+  };
 }
