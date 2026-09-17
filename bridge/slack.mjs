@@ -417,14 +417,11 @@ export function allowShare() {
   return true;
 }
 
-async function upload(token, filename, buf, title, { alt, snippet } = {}) {
+async function upload(token, filename, buf, title, { alt } = {}) {
   const j = await api('files.getUploadURLExternal', {
     filename,
     length: String(buf.length),
     ...(alt ? { alt_txt: alt.slice(0, 1000) } : {}),
-    // What makes this a Slack snippet rather than a file to download: it renders in the message
-    // as an expandable block, and the viewer can take the text from there.
-    ...(snippet ? { snippet_type: snippet } : {}),
   }, token);
   // The upload URL is pre-signed; it takes the bytes and no Authorization header.
   const res = await fetch(j.upload_url, {
