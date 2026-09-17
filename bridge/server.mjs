@@ -5,6 +5,7 @@ import {
   HOST, PORT, ORIGIN, PING_MS, ROOT, SESSION_KEY, STATE_FILE, TOKEN_FILE,
   codeBuild, pidAlive, rateLimiter, readToken, shortId, writeFileAtomic,
 } from '../lib/common.mjs';
+import { previewHash } from '../lib/format.mjs';
 import { Store, decodeShot } from './store.mjs';
 import {
   contentType, decodeSegments, injectOverlay, isFile, kindOf, overlayTags, readIfFile, safeJoin,
@@ -371,7 +372,7 @@ const server = http.createServer(async (req, res) => {
       saveState();
       const { previewId, pv } = found;
       const open = pv.external
-        ? `${target}${target.includes('#') ? '&' : '#'}cc=${previewId}`
+        ? previewHash(target, previewId)
         : `${ORIGIN}/p/${previewId}/`;
       return json(res, 200, { previewId, url: open, kind: pv.kind, external: pv.external, origin: pv.origin });
     }

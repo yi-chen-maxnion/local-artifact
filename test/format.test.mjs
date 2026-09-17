@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fmt, slackMessage, stripPreviewToken } from '../lib/format.mjs';
+import fs from 'node:fs';
+import { shortId } from '../lib/common.mjs';
+import { PREVIEW_TOKEN_SOURCE, fmt, previewHash, slackMessage, stripPreviewToken } from '../lib/format.mjs';
 
 const base = {
   seq: 1, n: 3, previewId: 'abcdef123456', repo: 'web', comment: 'make it blue',
@@ -61,6 +63,45 @@ test('the preview token is stripped, and the rest of the URL is not', () => {
   assert.equal(stripPreviewToken('http://x/#/route&cc=abcdef1234'), 'http://x/#/route');
   assert.equal(stripPreviewToken('http://x/#section'), 'http://x/#section');
   assert.equal(stripPreviewToken(''), '');
+});
+
+/**
+ * The property that matters: nothing the bridge appends can survive into a Slack message. A
+ * broken strip is silent, so this pins maker against stripper rather than either against a
+ * literal - with the real `shortId(8)`, which is where the id's alphabet and length come from.
+ */
+test('whatever the maker appends, the stripper takes back off', () => {
+  const targets = [
+    'http://localhost:5173/a',
+    'http://localhost:5173/a?b=1',
+    'http://localhost:5173/#/route',
+    'http://localhost:5173/#/route&tab=2',
+    'http://localhost:5173/#tab=2&panel=3',
+    'http://localhost:5173/a#section',
+  ];
+  const id = shortId(8);
+  assert.match(id, /^[a-f0-9]{16}$/);
+  for (const target of targets) {
+    // Uppercase because a hash typed or edited by hand is not always the case we wrote.
+    for (const previewId of [id, id.toUpperCase()]) {
+      const opened = previewHash(target, previewId);
+      assert.ok(opened.includes(previewId), `${opened} carries the token`);
+      assert.equal(stripPreviewToken(opened), target);
+    }
+  }
+});
+
+/**
+ * The extension is a classic script and the bookmarklet is a line in the README: neither can
+ * import this file, so both hold a copy of the regex. There is no build step to keep them in
+ * step - this test is it.
+ */
+test('the extension and the bookmarklet match the token this file defines', () => {
+  const literal = `/${PREVIEW_TOKEN_SOURCE}/`;
+  for (const file of ['extension/background.js', 'README.md']) {
+    const text = fs.readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    assert.ok(text.includes(literal), `${file} no longer contains ${literal} - the copies have drifted`);
+  }
 });
 
 
