@@ -1419,6 +1419,13 @@
     openPopover(anchor, locatorFor(anchor, t));
   }
 
+  /** All the way out, in one call, so the two right-click handlers below cannot drift apart. */
+  function leaveCommentMode() {
+    cancelDwell();
+    closePopover();
+    setPicking(false);
+  }
+
   /**
    * Right-click is the escape hatch: one gesture out of comment mode, wherever you are in it.
    * Inside our own popover the native menu is left alone, so copy and paste still work there.
@@ -1428,10 +1435,18 @@
     if (!state.picking && !panelOpen()) return;
     e.preventDefault();
     e.stopPropagation();
-    cancelDwell();
-    closePopover();
-    setPicking(false);
+    leaveCommentMode();
   }
+
+  // While a comment is written the shield takes the pointer, so the right-click lands on it and
+  // never on the page. A closed shadow root retargets that to the host, every `isOurs` predicate
+  // answers "ours", and the handler above stands down - leaving the native menu open over a page
+  // that is meant to be frozen. The shield stands in for the page, so it forwards the gesture.
+  el.shield.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    leaveCommentMode();
+  });
 
   // On `window`, not `document`: propagation runs window -> document -> element, so this is
   // the only place guaranteed to be ahead of every listener the page registered, including the

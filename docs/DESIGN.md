@@ -313,6 +313,15 @@ unaffected). And a wheel over the page scrolls the page rather than whatever scr
 happens to be under the cursor, since the cursor is on the shield — page scrolling, the case that
 matters for seeing context while writing, still works.
 
+A third followed, and was not accepted so much as discovered. Any full-viewport layer inside the
+host inherits every "this is ours" judgement made about the host: `isOurs` is a single predicate
+answering two questions that have quietly diverged — *is this the tool's own interface?* and *is
+this inside our host element?* The shield is the first thing for which the answers differ. Right-
+click was the first casualty: the gesture that leaves comment mode landed on the shield, was
+retargeted to the host, and the page-level handler stood down, so the native menu — Reload, Back —
+opened over a page that is meant to be frozen. The shield forwards that one gesture itself.
+Anything added later that asks `isOurs` should be checked against the shield before it is trusted.
+
 **Keys typed into the panel never reach the page.** A keyboard event leaves the shadow root
 retargeted to its host element, which no page shortcut handler recognises as a text field — so
 every letter of a comment also went to the page's shortcuts. Key events from inside the panel are
