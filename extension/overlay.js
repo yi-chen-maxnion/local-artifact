@@ -32,7 +32,9 @@
       slack: (w.slack?.connected && !ds.ccPreview) ? w.slack : null,
     };
   })();
-  if (!cfg.previewId) return;
+  // Every loader - the extension, the bridge, the bookmarklet - sets both of these. Without
+  // either one there is no session to speak for and no bridge to reach, so draw nothing.
+  if (!cfg.previewId || !cfg.origin) return;
 
   const MAX_HTML = 600;
   const DRAG_THRESHOLD = 6;
@@ -690,7 +692,6 @@
   .sp { flex:1; }
   .btn { position:relative; border:0; border-radius:7px; padding:7px 15px; font-size:13px;
     font-weight:600; cursor:pointer; background:${ACCENT}; color:#fff; }
-  .btn.ghost { background:#ffffff14; color:#c8c8d2; }
   /* Slack is a second destination, not a second Send, so it is outlined rather than filled -
      one primary action in the row, and this next to it. */
   .btn.outline { display:inline-flex; align-items:center; gap:6px; background:transparent;
