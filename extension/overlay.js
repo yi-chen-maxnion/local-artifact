@@ -1397,13 +1397,16 @@
         w: Math.round(Math.abs(e.clientX - d.x0)), h: Math.round(Math.abs(e.clientY - d.y0)),
       };
       if (r.w < 5 || r.h < 5) return;
-      const found = elementsInRegion(r, d.candidates || regionCandidates());
+      // One more than we list, because "there are more" has to be judged before the cap:
+      // a region holding exactly REGION_MAX_ELEMENTS reported as truncated otherwise.
+      const all = elementsInRegion(r, d.candidates || regionCandidates(), REGION_MAX_ELEMENTS + 1);
+      const found = all.slice(0, REGION_MAX_ELEMENTS);
       const under = targetAt(r.x + r.w / 2, r.y + r.h / 2);
       const anchor = {
         kind: 'region',
         rect: r,
         elements: found.map(brief),
-        truncated: found.length >= REGION_MAX_ELEMENTS || undefined,
+        truncated: all.length > REGION_MAX_ELEMENTS || undefined,
         // Only worth reporting when nothing was captured inside the box (a PDF or canvas);
         // alongside a populated element list it is just a confusing duplicate.
         container: !found.length && under
