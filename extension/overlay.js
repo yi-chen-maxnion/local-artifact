@@ -2175,15 +2175,27 @@
   /** Which half of the list a row is in, and the character the search box filters on. */
   const sigilFor = (kind) => (kind === 'user' || kind === 'im' || kind === 'mpim' ? '@' : '#');
 
-  function renderDest(rows, note) {
+  /**
+   * Five pages of 200 is where the bridge stops asking Slack, so in a large workspace the list it
+   * caches is missing names - and the box filters that cached list rather than searching Slack,
+   * so typing more of a name cannot bring a missing one back. Both ways the cut can show are
+   * said, because a short list and a full screenful each read as the whole workspace otherwise.
+   */
+  const DEST_CUT = 'Slack sent only the first 1000 names';
+
+  const dnote = (text) => {
+    const d = document.createElement('div');
+    d.className = 'dnote';
+    d.textContent = text;
+    return d;
+  };
+
+  function renderDest(rows, note, tail) {
     destRows = rows || [];
     destAt = destRows.length ? 0 : -1;
     el.dlist.textContent = '';
     if (note) {
-      const d = document.createElement('div');
-      d.className = 'dnote';
-      d.textContent = note;
-      el.dlist.appendChild(d);
+      el.dlist.appendChild(dnote(note));
       return;
     }
     for (const [i, r] of destRows.entries()) {
@@ -2201,6 +2213,9 @@
       b.addEventListener('click', (e) => { if (e.isTrusted) chooseDest(r); });
       el.dlist.appendChild(b);
     }
+    // A note, never a row: the arrow keys walk `.drow` elements and Enter indexes `destRows`, so
+    // what is appended after the rows cannot be selected or shift what a key lands on.
+    if (tail) el.dlist.appendChild(dnote(tail));
   }
 
   /** Arrow keys move a visible selection, because Enter on it now posts. */
@@ -2218,8 +2233,13 @@
     // A slower answer to an older query must not overwrite the one being read.
     if (mine !== destSeq || !el.dest.classList.contains('on')) return;
     if (j.error) return renderDest(null, j.error);
-    if (!j.rows?.length) return renderDest(null, q ? 'nothing matches' : 'no channels found');
-    renderDest(j.rows);
+    // Nothing to show is the moment a cut list matters most: what was searched for may simply
+    // never have been in it, and no amount of further typing is the answer.
+    if (!j.rows?.length) {
+      const none = q ? 'nothing matches' : 'no channels found';
+      return renderDest(null, j.truncated ? `${none} - ${DEST_CUT}, so this one may not be in the list` : none);
+    }
+    renderDest(j.rows, null, j.truncated ? `${DEST_CUT} - some are not listed` : '');
   }
 
   function showDest(on) {
