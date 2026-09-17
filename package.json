@@ -10,7 +10,7 @@
   "scripts": {
     "reinstall": "claude plugin uninstall local-artifact@local-artifact >/dev/null 2>&1; claude plugin install local-artifact@local-artifact",
     "installed-path": "node -e \"const j=require(require('os').homedir()+'/.claude/plugins/installed_plugins.json');const e=Object.entries(j).flatMap(([k,v])=>Object.entries(v)).find(([k])=>k.startsWith('local-artifact'));console.log(e?e[1][0].installPath:'not installed')\"",
-    "check": "for f in lib/*.mjs bridge/*.mjs scripts/*.mjs extension/*.js test/*.mjs; do node --check \"$f\" || exit 1; done && echo \"all files parse\"",
+    "check": "node scripts/check.mjs",
     "test": "node --test 'test/*.test.mjs'"
   },
   "devDependencies": {

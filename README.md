@@ -313,7 +313,7 @@ command frontmatter — those are read when the session starts.
 ```bash
 npm install             # dev only — see "Dependencies" below; nothing here needs it to run
 npm test                # bridge routes, security checks, notification format, overlay anchoring
-npm run check           # syntax-check every .mjs / .js
+npm run check           # syntax-check every .mjs / .js, and refuse raw control characters
 npm run reinstall       # refresh the cache copy (keeps the two in sync)
 npm run installed-path  # where the cache copy lives
 ```
