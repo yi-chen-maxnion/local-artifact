@@ -2077,6 +2077,7 @@
     savePins();
     closePopover();
     renderPins();
+    watchDom(); // the last pin takes the DOM observer with it
   });
 
   // Only a real click sends. With the panel in a closed shadow root a page script cannot reach
@@ -2407,6 +2408,20 @@
   };
 
   /**
+   * Everything a pin resolved, let go of. A route change under an SPA leaves every pin of the
+   * route before it holding a detached node - and through that node its whole detached subtree -
+   * for as long as the tab lives, since `cachedEl`'s isConnected check only ever runs for pins of
+   * the page being drawn. Nothing is lost by dropping them: the nodes come back from the selector,
+   * the range from the quote, the button and the row are rebuilt on sight. Those two are left
+   * where they are, for the sweeps in `renderPins` to take out with every other undrawn one.
+   */
+  function forget(p) {
+    if (!p._el && !p._ref && !p._holder && !p._range && !p._button && !p._row && !p._miss) return;
+    p._el = p._ref = p._holder = p._range = p._button = p._row = null;
+    p._miss = false;
+  }
+
+  /**
    * Where a locator's anchor is right now, in viewport coordinates, or null if it is gone.
    * The resolved node and range are cached on it: this runs on every repaint, and walking the
    * text of a container per frame is not something to do twice.
@@ -2415,10 +2430,16 @@
     const boxes = (list) => list.filter((r) => r.w > 0 || r.h > 0);
 
     if (p.kind === 'selection') {
-      if (!p._range || !p._range.startContainer?.isConnected) {
+      if (!p._miss && (!p._range || !p._range.startContainer?.isConnected)) {
         // No holder means the quote sat directly in <body>: look for it across the page.
         const within = p.selector ? cachedEl(p, '_holder', p.selector) : document.body;
         p._range = (within && p.quote && findQuote(within, p.quote)) || null;
+        // A quote that is not there is not there until the DOM changes, and `findQuote` walks
+        // every text node of its container - of the whole body, for a quote with no holder. One
+        // lost quote used to buy that walk on every scroll frame to find the same nothing. The
+        // mark is cleared on the mutation path only, which is the one thing that can change the
+        // answer; the holder fallback below still runs, so what is drawn is unchanged.
+        p._miss = !p._range;
       }
       if (p._range) {
         const list = boxes([...p._range.getClientRects()].map(rectOf));
@@ -2470,6 +2491,9 @@
     return { x: Math.max(2, x - 2), y: Math.max(2, y - 2) };
   }
 
+  /** Whether the last render had anything on this page. Starts true, so the first one always runs. */
+  let anyShown = true;
+
   /**
    * Each pin keeps its button for as long as it is drawn, and this only moves it. Rebuilding
    * every button on every scroll threw away a hovered pin's hover under the pointer and
@@ -2477,30 +2501,6 @@
    */
   function renderPins() {
     const here = pageKey();
-    const drawn = new Set();
-    const listed = new Set();
-    let n = 0;
-    let lost = 0;
-    for (const p of pins) {
-      if (p.page !== here) continue;
-      n++;
-      const rects = resolveRects(p);
-      if (!rects?.length) lost++;
-      if (state.listOpen) listed.add(listRow(p, !rects?.length));
-      if (!rects?.length) continue; // lost its anchor - listed, not drawn
-      if (!p._button) {
-        p._button = document.createElement('button');
-        p._button.className = 'pin';
-  /** Whether the last render had anything on this page. Starts true, so the first one always runs. */
-  let anyShown = true;
-
-        p._button.textContent = p.n;
-      }
-      const d = p._button;
-      const spot = pinSpot(rects[0]);
-      d.classList.toggle('active', state.viewing === p);
-      if (state.fresh === p) d.classList.add('in');
-      d.style.left = `${spot.x}px`;
     // Nearly every page, nearly always, has nothing of ours on it - and this runs once a frame for
     // as long as anything on the page is scrolling. With nothing shown last time and nothing to
     // show now there is nothing to clear either, so stop before the sweeps, the counting and the
@@ -2510,6 +2510,27 @@
     // at most 100 entries is the cheap half of this function. An open list is never skipped: it
     // prints `here` itself, so it has to follow a route change from nothing to nothing.
     if (!anyShown && !state.listOpen && !pins.some((p) => p.page === here)) return;
+    const drawn = new Set();
+    const listed = new Set();
+    let n = 0;
+    let lost = 0;
+    for (const p of pins) {
+      if (p.page !== here) { forget(p); continue; }
+      n++;
+      const rects = resolveRects(p);
+      if (!rects?.length) lost++;
+      if (state.listOpen) listed.add(listRow(p, !rects?.length));
+      if (!rects?.length) continue; // lost its anchor - listed, not drawn
+      if (!p._button) {
+        p._button = document.createElement('button');
+        p._button.className = 'pin';
+        p._button.textContent = p.n;
+      }
+      const d = p._button;
+      const spot = pinSpot(rects[0]);
+      d.classList.toggle('active', state.viewing === p);
+      if (state.fresh === p) d.classList.add('in');
+      d.style.left = `${spot.x}px`;
       d.style.top = `${spot.y}px`;
       if (d.parentNode !== el.pins) el.pins.appendChild(d);
       drawn.add(d);
@@ -2520,6 +2541,7 @@
     // instead of one. A closed list keeps its last rows; the next open brings them up to date.
     if (state.listOpen) for (const r of [...el.sideList.children]) if (!listed.has(r)) r.remove();
     state.fresh = null;
+    anyShown = n > 0; // what the guard at the top reads: everything below writes the empty state
 
     const comments = `${n} comment${n === 1 ? '' : 's'}`;
     el.badge.textContent = n > 99 ? '99+' : String(n);
@@ -2541,7 +2563,6 @@
   }
 
   /** A link struck through - the anchor this comment was tied to is not on the page. */
-    anyShown = n > 0; // what the guard at the top reads: everything below writes the empty state
   const LOST_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" '
     + 'stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7M15 '
     + '7h2a5 5 0 0 1 4 8M8 12h4M3 3l18 18"/></svg>';
@@ -2625,14 +2646,21 @@
    * which is the only thing that used to trigger a second look.
    *
    * So the DOM is watched. Bursts are coalesced into one repaint - a React commit is hundreds
-   * of mutations and they all mean the same thing - and the observer only runs while this page
+   * of mutations and they all mean the same thing - and the observer only runs while this origin
    * actually has pins to place.
+   *
+   * The condition is `pins.length`, not "pins on this page", and it is not an oversight: under an
+   * SPA the DOM mutation IS the only notice we get that the route changed, so an observer that
+   * woke only for pages that already have pins would never see us arrive at one.
    */
   let repaintTimer = null;
   const queueRepaint = () => {
     if (repaintTimer) return;
     repaintTimer = setTimeout(() => {
       repaintTimer = null;
+      // The DOM moved, so a quote that could not be found before is worth looking for again. Only
+      // here: the scroll and resize path re-reads the same text and would find the same nothing.
+      for (const p of pins) p._miss = false;
       renderPins();
       repaintHighlight(true);
       movePopover();
@@ -2640,8 +2668,11 @@
   };
 
   let domWatch = null;
+  /** Called on both sides of the condition: deleting the last pin has to take the observer down
+   *  with it, or it goes on firing on every mutation the page makes for the life of the tab. */
   function watchDom() {
-    if (domWatch || !pins.length) return;
+    if (!pins.length) { domWatch?.disconnect(); domWatch = null; return; }
+    if (domWatch) return;
     domWatch = new MutationObserver(queueRepaint);
     // Our own paints happen inside the shadow root, which this never sees - no feedback loop.
     domWatch.observe(document.documentElement, { childList: true, subtree: true });
