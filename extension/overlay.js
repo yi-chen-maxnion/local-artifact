@@ -2011,7 +2011,10 @@
       if (isolated) {
         j = await askExtension('comment', body, 20000);
         if (!j) throw new Error('the extension did not answer - refresh this page');
-        if (j.error) throw new Error(j.error);
+        // The worker answers a failure rather than throwing one, and `code` is the part of that
+        // answer which is not prose. Carried onto the error so the catch can read it instead of
+        // matching on a sentence the worker is free to reword.
+        if (j.error) throw Object.assign(new Error(j.error), { code: j.code, status: j.status });
       } else {
         const res = await fetch(`${cfg.origin}/comment`, {
           method: 'POST',
@@ -2031,10 +2034,13 @@
       if (capturing) await veil(false);
     } catch (e) {
       if (capturing) await veil(false);
-      // The browser reports an unreachable bridge and a refused cross-origin request with the
-      // same opaque "Failed to fetch". Neither is something to read a stack trace about - say
-      // the one thing that fixes it instead.
-      const offline = /failed to fetch|networkerror|load failed|fetch failed/i.test(e.message || '');
+      // One condition, two paths. Where the worker sent the comment it says so in a code, having
+      // done the fetch on our behalf; where this page sent it itself - a page the bridge serves,
+      // or the bookmarklet - the fetch is ours and the browser reports an unreachable bridge and
+      // a refused cross-origin request with the same opaque "Failed to fetch". Neither is
+      // something to read a stack trace about - say the one thing that fixes it instead.
+      const offline = e.code === 'bridge_unreachable' || e.code === 'bridge_timeout'
+        || /failed to fetch|networkerror|load failed|fetch failed/i.test(e.message || '');
       setStatus(offline
         ? 'The bridge is not answering - run /preview again in the session, then Send.'
         : `Not sent - ${e.message}`);

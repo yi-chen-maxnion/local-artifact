@@ -162,26 +162,45 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 /**
- * Send a comment on the page's behalf.
+ * Every call to the bridge, from the one place. POST when there is a body, GET when there is not.
  *
  * This is the route that makes a deployed build work. A page on https://example.com fetching
  * http://127.0.0.1 is a local-network request, which Chrome 142 and later gate behind a
  * permission prompt; from here it is an ordinary extension fetch covered by host permissions.
+ *
+ * A failure always comes back as a value, never as a throw, and always with the bridge's own
+ * words for it: one of these callers used to replace them with a status, which turned "that
+ * channel is archived" into "bridge 502".
  */
-async function post(route, payload, timeout = 25000) {
-  const r = await fetch(`${BRIDGE}${route}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(timeout),
-  });
+async function call(route, { body, timeout = 25000 } = {}) {
+  let r;
+  try {
+    r = await fetch(`${BRIDGE}${route}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeout),
+    });
+  } catch (e) {
+    /**
+     * `code` is the part that crosses the process boundary intact. The sentence beside it is for
+     * a person to read and may be reworded at any time; the popup and the panel decide what to
+     * offer from the code alone, so that rewording one of these cannot silently change a menu.
+     */
+    return e?.name === 'TimeoutError'
+      ? { error: 'the bridge did not answer in time', code: 'bridge_timeout' }
+      : { error: 'the bridge is not answering - run /preview again in the session', code: 'bridge_unreachable' };
+  }
   const j = await r.json().catch(() => ({}));
-  return r.ok ? j : { error: j.error || `bridge ${r.status}` };
+  if (r.ok) return j;
+  // The bridge's own code where it sent one - a Slack failure says which - and its status, which
+  // is how a daemon from older code is told apart: it answers a route it does not have with 404.
+  return { error: j.error || `bridge ${r.status}`, code: j.code || 'bridge_error', status: r.status };
 }
 
 async function sendComment(payload) {
   if (!payload.previewId) return { error: 'this page is not bound to a session - reload it' };
-  return post('/comment', payload);
+  return call('/comment', { body: payload });
 }
 
 /**
@@ -190,17 +209,13 @@ async function sendComment(payload) {
  * extension, so what a page can ask for is exactly what the panel offers, and no more.
  */
 async function slackDestinations(payload) {
-  const r = await fetch(`${BRIDGE}/slack/destinations?q=${encodeURIComponent(payload?.q || '')}`, {
-    signal: AbortSignal.timeout(15000),
-  });
-  const j = await r.json().catch(() => ({}));
-  return r.ok ? j : { error: j.error || `bridge ${r.status}` };
+  return call(`/slack/destinations?q=${encodeURIComponent(payload?.q || '')}`, { timeout: 15000 });
 }
 
 async function slackShare(payload) {
   if (!payload?.previewId) return { error: 'this page is not bound to a session - reload it' };
   // Two uploads and a post, each of which Slack may take its time over; the panel waits with it.
-  return post('/slack/share', payload, 60000);
+  return call('/slack/share', { body: payload, timeout: 60000 });
 }
 
 /**
@@ -212,12 +227,7 @@ let slackAt = 0;
 let slackWas = null;
 async function slackStatus() {
   if (slackWas && Date.now() - slackAt < 5000) return slackWas;
-  try {
-    const r = await fetch(`${BRIDGE}/slack/status`, { signal: AbortSignal.timeout(4000) });
-    slackWas = r.ok ? await r.json() : { error: `bridge ${r.status}` };
-  } catch {
-    slackWas = { error: 'bridge is not running - run /preview in Claude Code' };
-  }
+  slackWas = await call('/slack/status', { timeout: 4000 });
   slackAt = Date.now();
   return slackWas;
 }
@@ -225,14 +235,14 @@ async function slackStatus() {
 /** Starting and ending a Slack connection from the toolbar menu. */
 async function slackLogin() {
   slackWas = null;
-  const j = await post('/slack/login', {}, 8000);
+  const j = await call('/slack/login', { body: {}, timeout: 8000 });
   if (j.url) await chrome.tabs.create({ url: j.url });
   return j;
 }
 
 async function slackLogout() {
   slackWas = null;
-  return post('/slack/logout', {}, 8000);
+  return call('/slack/logout', { body: {}, timeout: 8000 });
 }
 
 /**

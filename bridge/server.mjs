@@ -103,6 +103,17 @@ function send(res, code, type, body, headers = {}) {
 const json = (res, code, obj) => send(res, code, 'application/json; charset=utf-8', JSON.stringify(obj));
 const html = (res, code, body) => send(res, code, 'text/html; charset=utf-8', body);
 
+/**
+ * A Slack failure as the extension receives it. The message is the prescription a person reads
+ * (see `explain` in slack.mjs) and it gets reworded; `code` is what the panel and the toolbar
+ * menu may branch on, and `auth` says the connection itself is broken rather than the request.
+ */
+const slackError = (e) => ({
+  error: e.message,
+  code: e.code || 'slack_error',
+  ...(e.auth ? { auth: true } : {}),
+});
+
 const isExtension = (origin) => /^chrome-extension:\/\//i.test(origin || '');
 const hasToken = (req) => req.headers['x-cc-token'] === TOKEN;
 
@@ -452,7 +463,7 @@ const server = http.createServer(async (req, res) => {
       try {
         return json(res, 200, await slack.destinations(url.searchParams.get('q') || ''));
       } catch (e) {
-        return json(res, e.status || 502, { error: e.message });
+        return json(res, e.status || 502, slackError(e));
       }
     }
 
@@ -485,7 +496,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { ok: true, label: out.label });
       } catch (e) {
         slack.shareFailed(e.message);
-        return json(res, e.status || 502, { error: e.message });
+        return json(res, e.status || 502, slackError(e));
       }
     }
 

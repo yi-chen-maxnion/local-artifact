@@ -62,9 +62,14 @@ async function main() {
     btn.hidden = true;
     btn.disabled = false;
     btn.className = 'btn';
-    // A 404 is the other shape of the same problem: a daemon from older code, which /preview
+    // On the code, never on the sentence: the worker's English is for a person to read and gets
+    // reworded, and matching it is how this menu would quietly fall back to "cannot get status".
+    // A 404 is the other shape of the same problem - a daemon from older code, which /preview
     // replaces on its next run - so both point at the same thing to do.
-    if (!s || s.error) return note(s?.error?.includes('bridge') ? 'Bridge 沒有在執行或版本過舊，請執行 /preview' : '無法取得狀態');
+    if (!s || s.error) {
+      const gone = s?.code === 'bridge_unreachable' || s?.code === 'bridge_timeout' || s?.status === 404;
+      return note(gone ? 'Bridge 沒有在執行或版本過舊，請執行 /preview' : '無法取得狀態');
+    }
     if (!s.configured) return note('尚未設定 Slack App，見 slack-app.json');
     if (s.connected) {
       note(`${s.user}${s.team ? `@${s.team}` : ''}`);
