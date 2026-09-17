@@ -14,7 +14,27 @@ import { comment, listen, preview, register, startBridge } from './helpers.mjs';
 async function startFakeSlack() {
   const calls = [];
   const uploads = new Map(); // upload path -> { filename, body }
-  let fail = null; // { method, error } - the next call to `method` answers with this Slack error
+  let fail = null; // { methods, error } - the next call to each answers with this Slack error
+  let pages = 0; // when set, users.list answers with this many cursor-linked pages instead
+
+  /**
+   * A gate the named methods can only pass through together, so "both were asked for before
+   * either was answered" is something a test can assert rather than time. It gives up after a
+   * moment and lets them through, because a loader that goes one at a time should fail the
+   * assertion rather than hang the suite.
+   */
+  let gate = null; // { methods, seen, waiters, release }
+  const openGate = (methods, ms = 1000) => new Promise((resolve) => {
+    const waiters = [];
+    const timer = setTimeout(() => gate?.release(false), ms);
+    const release = (ok) => {
+      gate = null;
+      clearTimeout(timer);
+      for (const w of waiters.splice(0)) w();
+      resolve(ok);
+    };
+    gate = { methods, seen: new Set(), waiters, release };
+  });
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://slack.test');
@@ -37,10 +57,17 @@ async function startFakeSlack() {
     const params = Object.fromEntries(new URLSearchParams(raw.toString('utf8')));
     calls.push({ method, params, auth: req.headers.authorization || '' });
 
-    if (fail?.method === method) {
-      const error = fail.error;
-      fail = null;
+    if (fail?.methods.includes(method)) {
+      const { error, methods } = fail;
+      fail = methods.length > 1 ? { error, methods: methods.filter((m) => m !== method) } : null;
       return reply({ ok: false, error });
+    }
+
+    if (gate?.methods.includes(method)) {
+      const g = gate;
+      g.seen.add(method);
+      if (g.methods.every((m) => g.seen.has(m))) g.release(true);
+      else await new Promise((r) => g.waiters.push(r));
     }
 
     switch (method) {
@@ -64,7 +91,15 @@ async function startFakeSlack() {
             { id: 'G1', is_mpim: true, name: 'mpdm-yi--ana--bo-1' },
           ],
         });
-      case 'users.list':
+      case 'users.list': {
+        if (pages) {
+          const at = Number(params.cursor || 1);
+          return reply({
+            ok: true,
+            members: [{ id: `U1${at}`, name: `filler-${at}`, profile: {} }],
+            ...(at < pages ? { response_metadata: { next_cursor: String(at + 1) } } : {}),
+          });
+        }
         return reply({
           ok: true,
           members: [
@@ -75,6 +110,7 @@ async function startFakeSlack() {
             { id: 'B1', name: 'a-bot', is_bot: true, profile: {} },
           ],
         });
+      }
       case 'conversations.open':
         return reply({ ok: true, channel: { id: `D-${params.users}` } });
       case 'chat.postMessage':
@@ -104,8 +140,11 @@ async function startFakeSlack() {
     authorize: `${base}/oauth/authorize`,
     calls,
     uploads,
-    failNext: (method, error) => { fail = { method, error }; },
-    reset: () => { calls.length = 0; uploads.clear(); fail = null; },
+    // One method, or several that should each fail once - as when two requests are in flight.
+    failNext: (method, error) => { fail = { methods: [method].flat(), error }; },
+    usersPages: (n) => { pages = n; },
+    together: openGate,
+    reset: () => { calls.length = 0; uploads.clear(); fail = null; pages = 0; gate?.release(false); },
     stop: () => new Promise((r) => server.close(r)),
   };
 }
@@ -269,6 +308,37 @@ describe('slack', () => {
       // A group DM with bo in it matches "bo" too, and should - it is still a way to reach them.
       assert.deepEqual((await (await list('@bo')).json()).rows.map((r) => r.label), ['@bo', 'yi, ana, bo']);
       assert.deepEqual((await (await list('#bo')).json()).rows, [], 'a person is not a channel');
+    });
+
+    test('ask for the two lists at once, not one chain after the other', async () => {
+      await login(); // a fresh login drops the cached lists, so both chains really run
+      const together = slack.together(['users.conversations', 'users.list']);
+      assert.equal((await list()).status, 200);
+      assert.equal(await together, true, 'neither list was answered before the other was asked for');
+    });
+
+    test('both failing is one error, and the daemon lives through it', async () => {
+      await login();
+      slack.failNext(['users.conversations', 'users.list'], 'ratelimited');
+      const res = await list();
+      assert.equal(res.status, 502);
+      assert.match((await res.json()).error, /rate limiting/);
+      // Whichever rejection lost the race was still handled - an unhandled one would have taken
+      // the bridge with it, and nothing cached the half-list that came back before the failure.
+      assert.equal((await list()).status, 200);
+    });
+
+    test('say when Slack had more to give, rather than lose a colleague quietly', async () => {
+      slack.usersPages(7); // more pages than the loader will follow
+      await login();
+      const j = await (await list()).json();
+      assert.equal(j.truncated, true);
+      assert.ok(j.rows.length, 'and what did arrive is still offered');
+    });
+
+    test('a list that fitted is not flagged', async () => {
+      await login();
+      assert.equal((await (await list()).json()).truncated, false);
     });
   });
 

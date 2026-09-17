@@ -293,18 +293,27 @@ export async function logout() {
 
 // ---------------------------------------------------------------- destinations
 
-let lists = null; // { at, convos, users }
+let lists = null; // { at, convos, users, truncated }
+
+/**
+ * Five pages of 200 and no more: each page is one Tier 2 call, so a cold start already costs up
+ * to ten of them, and no cap is large enough for the workspaces that would need one - the picker
+ * shows 30 rows and is searched, not scrolled. So the cap stays and the stop is reported instead:
+ * a cursor still in hand means Slack has more, and a colleague missing from the list has to be
+ * something the panel can say rather than something it silently does.
+ */
+const PAGES = 5;
 
 const paged = async (method, params, token, pick) => {
   const out = [];
   let cursor = '';
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < PAGES; i++) {
     const j = await api(method, { ...params, limit: '200', ...(cursor ? { cursor } : {}) }, token);
     out.push(...pick(j));
     cursor = j.response_metadata?.next_cursor || '';
     if (!cursor) break;
   }
-  return out;
+  return { rows: out, truncated: Boolean(cursor) };
 };
 
 /** `mpdm-ann--bob--cat-1` is how Slack names a group DM; the people in it are the useful part. */
@@ -313,15 +322,26 @@ const mpimLabel = (name) => String(name || '')
 
 async function load(token) {
   if (lists && Date.now() - lists.at < LIST_TTL) return lists;
-  const convos = await paged('users.conversations', {
-    types: 'public_channel,private_channel,mpim,im', exclude_archived: 'true',
-  }, token, (j) => j.channels || []);
+  /**
+   * Two chains, each sequential in itself because a cursor only exists once the page before it
+   * came back - but nothing in one waits on the other, and the picker says "Loading…" for as long
+   * as this takes. `Promise.all` subscribes to both before either settles, so the loser of a race
+   * to fail is still a handled rejection, and `lists` is assigned below only if both arrived.
+   */
+  const [convos, members] = await Promise.all([
+    paged('users.conversations', {
+      types: 'public_channel,private_channel,mpim,im', exclude_archived: 'true',
+    }, token, (j) => j.channels || []),
+    paged('users.list', {}, token, (j) => j.members || []),
+  ]);
   const users = new Map();
-  for (const u of await paged('users.list', {}, token, (j) => j.members || [])) {
+  for (const u of members.rows) {
     if (u.deleted || u.is_bot || u.id === 'USLACKBOT') continue;
     users.set(u.id, u.profile?.display_name || u.real_name || u.name || u.id);
   }
-  lists = { at: Date.now(), convos, users };
+  lists = {
+    at: Date.now(), convos: convos.rows, users, truncated: convos.truncated || members.truncated,
+  };
   return lists;
 }
 
@@ -347,7 +367,7 @@ function remember(dest) {
  */
 export async function destinations(q = '') {
   const token = await ensureFresh();
-  const { convos, users } = await load(token);
+  const { convos, users, truncated } = await load(token);
   const rows = [];
   const seenUser = new Set();
   for (const c of convos) {
@@ -396,7 +416,9 @@ export async function destinations(q = '') {
     if (ka !== kb) return ka - kb;
     return a.label.localeCompare(b.label);
   });
-  return { rows: matched.slice(0, 30), user: readToken()?.userName || '' };
+  // `truncated` is about what Slack gave, not about the 30 shown: the rows below are a screenful
+  // of a full list, but a truncated one is missing names no amount of typing will bring back.
+  return { rows: matched.slice(0, 30), truncated, user: readToken()?.userName || '' };
 }
 
 // ---------------------------------------------------------------- sharing
