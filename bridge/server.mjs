@@ -301,7 +301,13 @@ const server = http.createServer(async (req, res) => {
       if (!SESSION_KEY.test(String(b.key)) || !pidAlive(pid)) {
         return json(res, 400, { error: 'a valid session key and a live pid are required' });
       }
-      sessions.set(b.key, { key: b.key, pid, cwd: String(b.cwd || ''), repo: String(b.repo || ''), at: Date.now() });
+      // Merged, not replaced. A monitor reconnects by registering and only then reopening /events,
+      // so a fresh object here would drop `lastStream` - and void the grace window in exactly the
+      // gap it was written for.
+      sessions.set(b.key, {
+        ...sessions.get(b.key),
+        key: b.key, pid, cwd: String(b.cwd || ''), repo: String(b.repo || ''), at: Date.now(),
+      });
       // A monitor reconnecting is not a setup gesture, so it does not steal the browser from
       // another session - but if nothing holds it, someone has to.
       if (!sessions.has(primaryKey)) primaryKey = b.key;

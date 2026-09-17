@@ -237,3 +237,52 @@ describe('a session with nothing listening', () => {
     await reader.cancel();
   });
 });
+
+/**
+ * The gap a reconnecting monitor leaves: it registers first and opens its stream second, so the
+ * grace window has to survive the /register in between - it is the only thing holding the window
+ * open once the daemon is older than the grace itself.
+ */
+describe('a monitor between streams', () => {
+  const GRACE = 1200;
+  let bridge;
+  let key;
+
+  before(async () => {
+    bridge = await startBridge({ env: { LOCAL_ARTIFACT_LISTEN_GRACE_MS: String(GRACE) } });
+    key = await register(bridge);
+  });
+  after(() => bridge.stop());
+
+  /** How many monitors the daemon believes are on this session's stream. */
+  const clients = async () => {
+    const { sessions } = await (await bridge.request('/health')).json();
+    return sessions.find((s) => s.key === key)?.clients ?? 0;
+  };
+
+  test('a comment is still taken after it re-registers', async () => {
+    const res = await bridge.request('/preview', { json: { key, target: 'http://localhost:7200/' } });
+    const { previewId } = await res.json();
+    // Past the floor a just-started daemon gets, so only lastStream can hold the window open.
+    await new Promise((r) => setTimeout(r, GRACE + 50));
+
+    const stream = new AbortController();
+    const events = await fetch(`${bridge.origin}/events?session=${key}`, {
+      headers: { 'x-cc-token': bridge.token }, signal: stream.signal,
+    });
+    const reader = events.body.getReader();
+    assert.match(new TextDecoder().decode((await reader.read()).value), /event: hello/);
+    stream.abort();
+    // Back to back rather than on a timer: each round trip is its own turn of the event loop,
+    // and waiting between them would eat into the very window being tested.
+    for (let i = 0; i < 100 && await clients() > 0; i++) { /* spin on the round trip itself */ }
+    assert.equal(await clients(), 0); // the close is what writes lastStream
+
+    await register(bridge, key); // what a monitor does before reopening the stream
+    const sent = await bridge.request('/comment', {
+      token: null,
+      json: { previewId, comment: 'still here', page: { url: 'http://localhost:7200/a' } },
+    });
+    assert.equal(sent.status, 200, await sent.text());
+  });
+});
