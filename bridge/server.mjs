@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   HOST, PORT, ORIGIN, ROOT, SESSION_KEY, STATE_FILE, TOKEN_FILE,
-  codeBuild, pidAlive, readToken, shortId, writeFileAtomic,
+  codeBuild, pidAlive, rateLimiter, readToken, shortId, writeFileAtomic,
 } from '../lib/common.mjs';
 import { Store, decodeShot } from './store.mjs';
 import {
@@ -58,6 +58,24 @@ const startedAt = Date.now();
  * seconds would be wrong. Beyond the window, nothing is coming back for it.
  */
 const LISTEN_GRACE_MS = Number(process.env.LOCAL_ARTIFACT_LISTEN_GRACE_MS ?? 60 * 1000);
+/**
+ * How many comments one session takes in a minute, and what a page is told past that.
+ *
+ * The threat is a page - hostile, or merely a buggy loop - filling a session's context with
+ * notifications. The monitor used to hold this limit, which meant it could only ever drop
+ * comments the bridge had already answered 200 for: the panel had closed and the page had drawn
+ * a numbered pin, so the user was told a comment had arrived that nothing would ever read. Only
+ * the daemon can give the answer back to the person who pressed Send, so it refuses here.
+ *
+ * Per session, because the thing being protected is one Claude session's attention. A page the
+ * bridge accepts posts from can therefore spend that session's budget and keep the user from
+ * commenting for the rest of the minute - inherent to any limiter, and the lesser harm.
+ *
+ * The max is env-configurable purely so a test can set it to 2 rather than send 31 requests.
+ */
+const COMMENT_RATE_MAX = Number(process.env.LOCAL_ARTIFACT_COMMENT_RATE_MAX ?? 30);
+const COMMENT_RATE_WINDOW_MS = 60 * 1000;
+const commentRate = new Map(); // sessionKey -> limiter, dropped with the session
 /**
  * Which session an otherwise unbound page belongs to.
  *
@@ -236,6 +254,7 @@ function pruneSessions() {
     }
     for (const res of clients.get(key) || []) { try { res.end(); } catch {} }
     clients.delete(key);
+    commentRate.delete(key);
     store.forget(key);
   }
   if (!changed) return;
@@ -262,6 +281,12 @@ function listening(sessionKey) {
   // reconnecting right now, and they have not had the chance to be seen yet.
   const seen = Math.max(sessions.get(sessionKey)?.lastStream || 0, startedAt);
   return Date.now() - seen < LISTEN_GRACE_MS;
+}
+
+function allowComment(sessionKey) {
+  let allow = commentRate.get(sessionKey);
+  if (!allow) commentRate.set(sessionKey, allow = rateLimiter(COMMENT_RATE_MAX, COMMENT_RATE_WINDOW_MS));
+  return allow();
 }
 
 function broadcast(sessionKey, payload) {
@@ -539,6 +564,11 @@ const server = http.createServer(async (req, res) => {
       }
       const text = String(b.comment || '').slice(0, 8000).trim();
       if (!text) return json(res, 400, { error: 'empty comment' });
+      // Last of the checks that cost nothing, and before the first thing that does: a refused
+      // comment consumes no comment number, no sequence number and no disk.
+      if (!allowComment(pv.sessionKey)) {
+        return json(res, 429, { error: 'too many comments in a minute - wait a moment and send it again' });
+      }
 
       // The same key the overlay files its markers under, so the two agree about what "a page"
       // is: path and query, never the hash - which is where our own #cc= token lives.

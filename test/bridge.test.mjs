@@ -398,6 +398,91 @@ describe('a screenshot the bridge cannot save', () => {
 });
 
 /**
+ * A flood has to be refused to the page, not swallowed behind a 200. The limit used to live in
+ * the monitor, downstream of every answer the person who pressed Send could see: the bridge had
+ * already taken the comment, numbered it and closed the panel over it.
+ */
+describe('more comments in a minute than a session will take', () => {
+  let bridge;
+  let a;
+  let b;
+
+  /** A registered session with a real monitor on its stream and a preview of its own. */
+  const session = async (key, target) => {
+    await register(bridge, key);
+    const events = await fetch(`${bridge.origin}/events?session=${key}`, {
+      headers: { 'x-cc-token': bridge.token },
+    });
+    const reader = events.body.getReader();
+    const dec = new TextDecoder();
+    let buf = dec.decode((await reader.read()).value, { stream: true });
+    assert.ok(buf.includes('event: hello'), buf);
+    const res = await bridge.request('/preview', { json: { key, target } });
+    const { previewId } = await res.json();
+    return {
+      previewId,
+      send: (comment) => bridge.request('/comment', {
+        token: null, json: { previewId, comment, page: { url: `${target}a` } },
+      }),
+      /** The next delivered comment, frames buffered and parsed as scripts/monitor.mjs parses them. */
+      next: async () => {
+        for (;;) {
+          let i;
+          while ((i = buf.indexOf('\n\n')) !== -1) {
+            const { event, data } = parseFrame(buf.slice(0, i));
+            buf = buf.slice(i + 2);
+            if (event === 'comment' && data !== undefined) return JSON.parse(data);
+          }
+          const { value, done } = await reader.read();
+          if (done) throw new Error('the stream ended');
+          buf += dec.decode(value, { stream: true });
+        }
+      },
+      cancel: () => reader.cancel(),
+    };
+  };
+
+  before(async () => {
+    // Two a minute rather than thirty, so the test does not have to send thirty-one; and no grace
+    // window, so each session's own stream is what makes its comments deliverable.
+    bridge = await startBridge({
+      env: { LOCAL_ARTIFACT_COMMENT_RATE_MAX: '2', LOCAL_ARTIFACT_LISTEN_GRACE_MS: '0' },
+    });
+    a = await session(`p${process.pid}`, 'http://localhost:7400/');
+    // A second session: as above, the key only has to be a valid one over a live pid.
+    b = await session(`p${process.pid}1`, 'http://localhost:7401/');
+  });
+  after(async () => {
+    await a.cancel();
+    await b.cancel();
+    await bridge.stop();
+  });
+
+  test('refuses the ones past it, and spends nothing on a refusal', async () => {
+    assert.equal((await (await a.send('one')).json()).n, 1);
+    assert.equal((await (await a.send('two')).json()).n, 2);
+
+    const refused = await a.send('three');
+    assert.equal(refused.status, 429);
+    assert.match((await refused.json()).error, /too many comments in a minute/);
+
+    // Exactly two arrived, numbered 1 and 2 over consecutive sequence numbers - so the refused
+    // one took no comment number and no place in the sequence.
+    const first = await a.next();
+    const second = await a.next();
+    assert.deepEqual([first.n, second.n], [1, 2]);
+    assert.deepEqual([first.seq, second.seq], [1, 2]);
+
+    // Another session has its own budget: what is being protected is one session's attention.
+    const other = await b.send('mine');
+    assert.equal(other.status, 200);
+    const third = await b.next();
+    assert.equal(third.n, 1);
+    assert.equal(third.seq, 3); // not 4 - the refusal never reached ++seq
+  });
+});
+
+/**
  * The gap a reconnecting monitor leaves: it registers first and opens its stream second, so the
  * grace window has to survive the /register in between - it is the only thing holding the window
  * open once the daemon is older than the grace itself.

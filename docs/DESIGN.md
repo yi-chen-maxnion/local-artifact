@@ -725,8 +725,14 @@ Anything that is not a page, a PDF, markdown or an image is shown as plain text.
   and fail in ways that look like the new code being broken. `/health` reports where the daemon
   was started from and a fingerprint of its code; `/preview` compares both with its own and
   restarts the daemon when they differ.
-- **More than 30 comments a minute are dropped**, and the monitor says so once rather than per
-  comment, so a flood is not mistaken for silence.
+- **More than 30 comments a minute from one session are refused**, by the daemon, with a `429` the
+  panel prints under the comment — the text stays in the box and can be sent again in a moment.
+  The limit used to live in the monitor, where it could only drop comments the bridge had already
+  answered `200` for: the panel had closed over a numbered pin, so the user was told a comment had
+  arrived that nothing would ever read. Only the daemon can answer the person who pressed Send.
+  It is counted per session because what is being protected is one session's attention; a page the
+  bridge takes comments from can therefore spend that budget and leave the user unable to comment
+  for the rest of the minute, which is inherent to any limiter and the lesser of the two harms.
 - **Screenshots are intermediates**: `$TMPDIR/claude-ui-comments/<sessionKey>/`, removed when the
   monitor exits. Nothing is ever written into your repo.
 

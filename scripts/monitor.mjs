@@ -39,33 +39,23 @@ const STALE_MS = 70000; // two missed pings plus slack
  * instead of waiting out the staleness window with a stream that is already dead.
  */
 const WAKE_JUMP_MS = 20000;
-const RATE_WINDOW_MS = 60000;
-const RATE_MAX = 30;
 
 let lastSeq = 0;
 let instance = null;
-let stamps = [];
-let dropping = false;
 
-function rateOk() {
-  const now = Date.now();
-  stamps = stamps.filter((t) => now - t < RATE_WINDOW_MS);
-  if (stamps.length >= RATE_MAX) return false;
-  stamps.push(now);
-  return true;
-}
-
+/**
+ * Nothing is rate-limited here. A flood is refused by the daemon instead, per session and at the
+ * same policy this file used to hold - and it answers the request with a 429 the panel prints
+ * under the comment, which is the only place the answer reaches the person who pressed Send.
+ * A second copy here could only ever drop a comment the page had already been told had arrived.
+ *
+ * The one burst this end can still see that the daemon did not throttle is a reconnect replaying
+ * the buffer - up to REPLAY_MAX events at once. Every one of those was admitted under the limit
+ * when it was sent, and dropping them here is exactly the silent loss being fixed.
+ */
 function emit(p) {
   if (p.seq <= lastSeq) return;
   lastSeq = p.seq;
-  if (!rateOk()) {
-    // Said once rather than per comment - a flood is exactly when a line per event is worst -
-    // but said, so a burst of lost comments is not mistaken for none being sent.
-    if (!dropping) process.stdout.write(`[ui-comments] more than ${RATE_MAX} comments in a minute - dropping the rest until it slows down\n`);
-    dropping = true;
-    return;
-  }
-  dropping = false;
   process.stdout.write(fmt(p)); // one write => one batched notification
 }
 
