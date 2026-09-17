@@ -15,11 +15,10 @@
 
   const cfg = (() => {
     const ds = document.currentScript?.dataset || {};
-    const fromHash = /[#&]cc=([a-f0-9]{8,})/.exec(location.hash)?.[1];
     const w = window.__ccConfig || {};
     return {
-      previewId: ds.ccPreview || w.previewId || fromHash || null,
-      origin: ds.ccOrigin || w.origin || 'http://127.0.0.1:4517',
+      previewId: ds.ccPreview || w.previewId || null,
+      origin: ds.ccOrigin || w.origin || null,
       // Which session this page is talking to. It used to be implicit - you had just run
       // /preview on this exact URL - but the overlay now appears on any page the set-up session
       // owns, including a deployed build, so where a comment is going has to be legible.
