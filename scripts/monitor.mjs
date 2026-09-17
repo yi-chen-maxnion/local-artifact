@@ -7,7 +7,7 @@
  * costs one small process and a retry timer, nothing more.
  */
 import fs from 'node:fs';
-import { ORIGIN, PING_MS, bridge, readToken, resolveSession, scratchDir } from '../lib/common.mjs';
+import { ORIGIN, PING_MS, bridge, readToken, resolveSession, scratchDir, sleep } from '../lib/common.mjs';
 import { fmt } from '../lib/format.mjs';
 import { parseFrame } from '../lib/sse.mjs';
 
@@ -143,5 +143,5 @@ for (;;) {
     if (e.status && e.message !== lastRefusal) console.error(`ui-comments: the bridge refused: ${e.message}`);
     if (e.status) lastRefusal = e.message;
   }
-  await new Promise((r) => setTimeout(r, misses > FAST_ATTEMPTS ? RETRY_SLOW_MS : RETRY_FAST_MS));
+  await sleep(misses > FAST_ATTEMPTS ? RETRY_SLOW_MS : RETRY_FAST_MS);
 }
