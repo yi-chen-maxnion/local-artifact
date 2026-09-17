@@ -17,19 +17,29 @@ const freePort = () => new Promise((resolve, reject) => {
 });
 
 /**
- * A daemon of its own: a free port and a private TMPDIR, so a test never touches the state,
- * token or scratch of a bridge that is actually in use.
+ * A daemon of its own: a free port, a private TMPDIR and a private config directory, so a test
+ * never touches the state, token or scratch of a bridge that is actually in use - nor the real
+ * config directory, where a real Slack user token lives.
  */
 export async function startBridge({ tmp, port: fixedPort, env = {} } = {}) {
   const port = fixedPort || await freePort();
   const dir = tmp || fs.mkdtempSync(path.join(os.tmpdir(), 'cc-bridge-test-'));
   const stateDir = path.join(dir, 'claude-ui-comments');
+  // Derived from `dir` rather than freshly made, so a restart onto the same tmp keeps its config.
+  const configDir = path.join(dir, 'config');
+  fs.mkdirSync(configDir, { recursive: true });
   // A previous daemon's token would otherwise be read before this one writes its own.
   fs.rmSync(path.join(stateDir, `token-${port}`), { force: true });
   const child = spawn(process.execPath, [path.join(ROOT, 'bridge', 'server.mjs')], {
-    // `env` is how a test points the daemon at a fake Slack and its own config directory:
-    // nothing here may touch the real one, which holds a real token.
-    env: { ...process.env, LOCAL_ARTIFACT_PORT: String(port), TMPDIR: dir, ...env },
+    // The config directory is the empty one above unless a test names its own - never the real
+    // one, which holds a real Slack token. `env` comes last so a test can still override it.
+    env: {
+      ...process.env,
+      LOCAL_ARTIFACT_PORT: String(port),
+      TMPDIR: dir,
+      LOCAL_ARTIFACT_CONFIG_DIR: configDir,
+      ...env,
+    },
     stdio: ['ignore', 'ignore', 'inherit'],
   });
   const origin = `http://127.0.0.1:${port}`;
@@ -60,7 +70,7 @@ export async function startBridge({ tmp, port: fixedPort, env = {} } = {}) {
     child.kill();
   });
 
-  return { port, origin, dir, stateDir, token, request, stop, child };
+  return { port, origin, dir, stateDir, configDir, token, request, stop, child };
 }
 
 /** Registers a session owned by this test process, which is alive for as long as the test is. */

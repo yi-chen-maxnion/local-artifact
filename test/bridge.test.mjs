@@ -38,6 +38,16 @@ describe('bridge', () => {
       assert.ok(full.sessions.some((s) => s.key === key));
     });
 
+    // The one that fails on a developer machine if the helper's config isolation is ever
+    // dropped: this daemon asked for no config directory, so it must be looking at an empty
+    // one of its own rather than at the real token - which /health would report by name.
+    test('a daemon started with no extra env has no Slack connection', async () => {
+      const { slack } = await (await bridge.request('/health')).json();
+      assert.equal(slack.connected, false);
+      assert.equal(slack.user, '');
+      assert.equal(slack.team, '');
+    });
+
     test('refuse a body that is not JSON, which a page could send without a preflight', async () => {
       const res = await bridge.request('/register', {
         body: JSON.stringify({ key, pid: process.pid }), headers: { 'content-type': 'text/plain' },
