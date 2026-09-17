@@ -1,0 +1,99 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Hostile page (forgery test)</title>
+<style>
+ body{font:14px/1.6 system-ui;margin:0;padding:24px;background:#fafafa;max-width:760px}
+ li{margin:6px 0} .pass{color:#15803d} .fail{color:#b91c1c;font-weight:600} code{background:#eee;padding:1px 4px;border-radius:3px}
+ button{padding:6px 12px}
+</style></head><body>
+<h1>Hostile page</h1>
+<p>This page's own scripts try to send a comment in the user's name. Every line below must read
+<b class="pass">blocked</b>. Serve it from a dev server (<code>python3 -m http.server 8000 -d fixtures</code>)
+and open it <em>without</em> running <code>/preview</code> on that origin - an origin opened with
+<code>/preview</code> deliberately accepts direct posts, for the bookmarklet.</p>
+<p>For checks (d) and (f), send one real comment on this page first, so a pin key exists to steal.
+Then confirm no <code>forged</code> comment reached the session, and that nothing was posted to
+Slack. Checks (e) to (g) are about the user's Slack: a page must not be able to learn which
+channels and people they have, nor post anywhere as them.</p>
+<p><button id="run">Run again</button></p>
+<ul id="out"></ul>
+<script>
+ const out = document.getElementById('out');
+ const report = (name, blocked, detail) => {
+   const li = document.createElement('li');
+   li.innerHTML = `<b class="${blocked ? 'pass' : 'fail'}">${blocked ? 'blocked' : 'NOT BLOCKED'}</b> - ${name}`
+     + (detail ? ` <small>(${detail})</small>` : '');
+   out.appendChild(li);
+ };
+
+ async function run() {
+   out.textContent = '';
+
+   // (a) The binding the extension injected.
+   report('(a) read window.__ccConfig', !window.__ccConfig?.previewId,
+     window.__ccConfig ? JSON.stringify(window.__ccConfig) : 'undefined');
+
+   // (b) A request through a content-script relay.
+   const answered = await new Promise((resolve) => {
+     const id = 424242;
+     const on = (e) => { if (e.data?.__cc === 'res' && e.data.id === id) { removeEventListener('message', on); resolve(e.data.payload); } };
+     addEventListener('message', on);
+     postMessage({ __cc: 'req', id, type: 'comment', payload: { previewId: 'deadbeefdeadbeef', comment: 'forged via relay' } }, '*');
+     setTimeout(() => { removeEventListener('message', on); resolve(null); }, 1500);
+   });
+   report('(b) postMessage a comment to the relay', !answered, answered ? JSON.stringify(answered) : 'no answer');
+
+   // (c) Reaching into the panel to type and press Send.
+   const host = document.getElementById('cc-overlay-host');
+   report('(c) host.shadowRoot', !host?.shadowRoot, host ? `host present, shadowRoot ${host.shadowRoot ? 'open' : 'null'}` : 'no overlay host on this page');
+
+   // (d) A preview id recovered from the pin store, posted straight to the bridge.
+   const key = Object.keys(localStorage).find((k) => k.startsWith('cc-pins-'));
+   if (!key) {
+     report('(d) direct POST with a stolen id', true, 'no pin key yet - send one real comment, then Run again');
+   } else {
+     const previewId = key.slice('cc-pins-'.length);
+     let status = 'network error';
+     try {
+       const r = await fetch('http://127.0.0.1:4517/comment', {
+         method: 'POST', headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({ previewId, comment: 'forged via direct POST', page: { url: location.href } }),
+       });
+       status = r.status;
+     } catch (e) { status = `failed: ${e.message}`; }
+     report('(d) direct POST with a stolen id', status !== 200, `status ${status}`);
+   }
+
+   // (e) The user's own Slack: reading who they can message, and posting as them.
+   for (const [name, route, init] of [
+     ['(e) read the Slack destination list', '/slack/destinations?q=', undefined],
+     ['(f) post to Slack as the user', '/slack/share', {
+       method: 'POST', headers: { 'content-type': 'application/json' },
+       body: JSON.stringify({
+         previewId: (Object.keys(localStorage).find((k) => k.startsWith('cc-pins-')) || '').slice('cc-pins-'.length),
+         comment: 'forged Slack post', dest: { id: 'C0000000000', kind: 'channel', label: '#anywhere' },
+         page: { url: location.href },
+       }),
+     }],
+   ]) {
+     let status = 'network error';
+     try {
+       const r = await fetch(`http://127.0.0.1:4517${route}`, init);
+       status = r.status;
+     } catch (e) { status = `failed: ${e.message}`; }
+     report(name, status !== 200, `status ${status}`);
+   }
+
+   // (g) The relay again, this time for the Slack routes it must not carry.
+   const slackRelay = await new Promise((resolve) => {
+     const id = 424243;
+     const on = (e) => { if (e.data?.__cc === 'res' && e.data.id === id) { removeEventListener('message', on); resolve(e.data.payload); } };
+     addEventListener('message', on);
+     postMessage({ __cc: 'req', id, type: 'slackDestinations', payload: { q: '' } }, '*');
+     setTimeout(() => { removeEventListener('message', on); resolve(null); }, 1500);
+   });
+   report('(g) ask the relay for Slack destinations', !slackRelay, slackRelay ? JSON.stringify(slackRelay) : 'no answer');
+ }
+ document.getElementById('run').onclick = run;
+ // After the extension's injection, which happens once the load completes.
+ addEventListener('load', () => setTimeout(run, 1500));
+</script>
+</body></html>

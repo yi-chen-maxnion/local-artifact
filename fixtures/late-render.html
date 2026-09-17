@@ -1,0 +1,14 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Late render test</title>
+<style>body{font:14px/1.6 system-ui;margin:0;padding:24px;background:#f6f7f9}
+ #app{min-height:200px}.card{padding:16px;border:1px solid #ddd;border-radius:8px;background:#fff;width:420px;margin-bottom:10px}</style>
+</head><body>
+<h1>Late render test</h1>
+<p>The app paints 1.2s after load, the way a real SPA does.</p>
+<div id="app"><em>loading…</em></div>
+<script>
+ setTimeout(() => {
+   app.innerHTML = '<div class="card" id="c0"><b>Card 0</b><p id="t0">First card body text.</p><button id="act0">act 0</button></div>'
+                 + '<div class="card" id="c1"><b>Card 1</b><p id="t1">Second card body text.</p><button id="act1">act 1</button></div>';
+ }, 1200);
+</script>
+</body></html>

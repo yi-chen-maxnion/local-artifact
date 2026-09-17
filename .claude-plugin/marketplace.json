@@ -1,0 +1,14 @@
+{
+  "name": "local-artifact",
+  "owner": {
+    "name": "yi.chen"
+  },
+  "plugins": [
+    {
+      "name": "local-artifact",
+      "source": "./",
+      "description": "Point at anything in a locally-opened page and send a comment back to the Claude Code session that opened it."
+    }
+  ],
+  "description": "Artifact-style commenting for any locally-opened page: point at something in the browser and the comment, its anchor and a screenshot land back in the Claude Code session that opened it."
+}

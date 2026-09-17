@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Local Artifact Comments</title>
+<style>
+  /* The same dark card and accent as the panel on the page, so the menu reads as the same tool. */
+  :root { --accent:#6366f1; }
+  * { box-sizing:border-box; }
+  body { margin:0; width:292px; background:#17171b; color:#f2f2f4;
+    font:13px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .head { padding:12px 14px 8px; border-bottom:1px solid #ffffff14; }
+  .name { font-weight:600; }
+  .origin { margin-top:1px; font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; color:#8a8a95;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row { display:flex; align-items:center; gap:12px; padding:10px 14px; cursor:pointer; }
+  .row:hover { background:#ffffff0a; }
+  .row.disabled { cursor:default; opacity:.45; }
+  .row.disabled:hover { background:transparent; }
+  .label { flex:1; min-width:0; }
+  .label small { display:block; color:#8a8a95; font-size:12px; }
+  /* A switch drawn from the checkbox itself, so it stays a real, focusable form control. */
+  .switch { appearance:none; flex:none; width:32px; height:18px; margin:0; border-radius:9px;
+    background:#3a3a44; position:relative; cursor:inherit; transition:background .15s ease; }
+  .switch::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px;
+    border-radius:50%; background:#fff; transition:translate .15s ease; }
+  .switch:checked { background:var(--accent); }
+  .switch:checked::after { translate:14px 0; }
+  .switch:focus-visible { outline:2px solid color-mix(in srgb, var(--accent) 70%, #fff); outline-offset:2px; }
+  @media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition:none; } }
+  /* Slack sits below the switches and behind a divider: the two above are per-site preferences,
+     this is an account this browser is connected to, and it is set once rather than toggled. */
+  .sep { border-top:1px solid #ffffff14; }
+  .btn { flex:none; border:0; border-radius:6px; padding:5px 11px; font:600 12px/1.45 inherit;
+    background:var(--accent); color:#fff; cursor:pointer; }
+  .btn.ghost { background:#ffffff14; color:#c8c8d2; }
+  /* Connecting is the one action in this menu that turns something on, and it borrows Slack's
+     own green so the row reads as being about Slack rather than about this extension. */
+  .btn.go { background:#2eb67d; }
+  .btn.go:hover { background:#36c990; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  /* The account this browser posts as. Mono, because it is a name and a workspace, not prose. */
+  .who { font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; color:#9b9ba6; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="name">設定</div>
+    <div class="origin" id="origin"></div>
+  </div>
+  <label class="row" id="site-row">
+    <span class="label">在這個網站上<small id="site-note">留言按鈕與標記</small></span>
+    <input type="checkbox" class="switch" id="site">
+  </label>
+  <label class="row">
+    <span class="label">非留言模式也顯示標記<small>淡化的標記會留在頁面上</small></span>
+    <input type="checkbox" class="switch" id="pins">
+  </label>
+  <div class="row sep" id="slack-row">
+    <span class="label">Slack<small id="slack-note" class="who" hidden></small></span>
+    <button class="btn" id="slack-btn" hidden></button>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

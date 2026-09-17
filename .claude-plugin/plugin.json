@@ -1,0 +1,12 @@
+{
+  "name": "local-artifact",
+  "displayName": "Local Artifact Comments",
+  "version": "0.1.0",
+  "description": "Comment on any locally-opened page (dev server, HTML file, PDF) by pointing at it in the browser; the comment, its anchor and a screenshot land back in the Claude Code session that opened it.",
+  "author": { "name": "yi.chen" },
+  "license": "MIT",
+  "keywords": ["artifact", "comments", "browser", "preview", "annotation"],
+  "experimental": {
+    "monitors": "./monitors/monitors.json"
+  }
+}

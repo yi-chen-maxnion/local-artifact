@@ -1,0 +1,38 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Interactive page (freeze test)</title>
+<style>
+ body{font:14px/1.6 system-ui;margin:0;padding:24px;background:#fafafa}
+ .row{margin:10px 0}
+ button{padding:8px 14px;border-radius:6px;border:1px solid #ccc;background:#fff;cursor:pointer}
+ #card{display:none;padding:8px;background:#fee;border:1px solid #f99;border-radius:6px;width:220px}
+ /* No listener anywhere: only the shield over the page can stop this one. */
+ .zoom{display:inline-block;padding:4px 8px;border:1px dashed #999;border-radius:6px;
+   transform-origin:left center;transition:transform .12s ease,background .12s ease}
+ .zoom:hover{transform:scale(1.6);background:#ffe08a}
+ pre{background:#111;color:#0f0;padding:10px;border-radius:6px}
+</style></head><body>
+<h1>Interactive page</h1>
+<p>Everything here changes the page. In comment mode none of it may fire: the counters must
+stay put, the hover card must stay closed and the link must not navigate.</p>
+<p>The magnifier below has <b>no listener at all</b> — it is a CSS <code>:hover</code> rule, so
+stopping events cannot reach it. With a comment panel open it must not grow: that is the shield
+over the page, not the freeze.</p>
+<div class="row"><button id="b">Click me</button> <a id="a" href="#navigated">a link</a></div>
+<div class="row" id="hoverzone">hover me to open a card</div>
+<div class="row"><span class="zoom">hover me to magnify (CSS only)</span></div>
+<div id="card">a hover card that changed the page</div>
+<div class="row"><p id="para">Selectable paragraph text for the quoting path.</p></div>
+<pre id="log">counters</pre>
+<script>
+ const c = { click:0, pointerdown:0, mousedown:0, mouseup:0, mouseover:0, keydown:0, docCapture:0, navigated:0 };
+ const render = () => log.textContent = JSON.stringify(c);
+ // registered on document at load, in the capture phase - the case a page-level listener wins
+ document.addEventListener('pointerdown', () => { c.docCapture++; render(); }, true);
+ for (const t of ['click','pointerdown','mousedown','mouseup','mouseover']) {
+   b.addEventListener(t, () => { c[t]++; render(); });
+ }
+ hoverzone.addEventListener('mouseover', () => { card.style.display='block'; });
+ document.addEventListener('keydown', () => { c.keydown++; render(); });
+ addEventListener('hashchange', () => { c.navigated++; render(); });
+ render();
+</script>
+</body></html>

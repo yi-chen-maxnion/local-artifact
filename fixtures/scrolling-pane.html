@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Inner scroll test</title>
+<style>
+ body{font:14px/1.6 system-ui;margin:0;padding:20px;background:#f6f7f9}
+ #pane{height:360px;overflow:auto;border:1px solid #ccc;border-radius:8px;background:#fff;padding:16px;width:520px}
+ .item{padding:14px;margin-bottom:12px;border:1px solid #eee;border-radius:6px}
+ button{padding:6px 12px}
+</style></head><body>
+<h1>Inner scroll test</h1>
+<p>The window never scrolls. The pane does.</p>
+<div id="pane">
+  <div class="item" id="i0"><b>Item 0</b><p id="p0">Alpha paragraph, the quoting target for the first item in this list.</p><button>act 0</button></div>
+  <div class="item" id="i1"><b>Item 1</b><p id="p1">Beta paragraph, a second block of text that wraps onto more than one line so the tint has several line boxes to remember.</p><button>act 1</button></div>
+  <div class="item" id="i2"><b>Item 2</b><p id="p2">Gamma paragraph.</p><button>act 2</button></div>
+  <div class="item" id="i3"><b>Item 3</b><p id="p3">Delta paragraph.</p><button>act 3</button></div>
+  <div class="item" id="i4"><b>Item 4</b><p id="p4">Epsilon paragraph.</p><button>act 4</button></div>
+  <div class="item" id="i5"><b>Item 5</b><p id="p5">Zeta paragraph.</p><button>act 5</button></div>
+</div>
+</body></html>

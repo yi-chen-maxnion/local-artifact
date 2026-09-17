@@ -1,0 +1,4 @@
+{
+  "_": "The Slack app comments are posted through. The client id is not a secret - the app is a PKCE public client, so there is no client secret anywhere in this plugin. See README.md, 'Posting a comment to Slack'. Override with LOCAL_ARTIFACT_SLACK_CLIENT_ID.",
+  "clientId": "7630431780389.12069166571943"
+}
