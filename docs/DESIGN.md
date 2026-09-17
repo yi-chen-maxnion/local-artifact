@@ -712,7 +712,10 @@ Anything that is not a page, a PDF, markdown or an image is shown as plain text.
   numbers the monitor has already seen would have every one of those events discarded as a
   duplicate — no error, no log, the comment simply never arrives. Each daemon therefore announces
   an `instance` id in its SSE `hello`, and the monitor resets its watermark whenever that changes.
-  This bug was real and cost a comment before it was found.
+  A reset does not leave it at nothing: the same `hello` carries the daemon's own `seq`, and the
+  monitor adopts it, so it is owed everything the new daemon numbers from that moment on — see
+  **When a comment does not arrive** for why a watermark of 0 had to stop meaning "send me
+  nothing". This bug was real and cost a comment before it was found.
 - **Preview links survive a daemon restart.** The preview table, the comment counters and the
   event sequence counter are persisted to `$TMPDIR/claude-ui-comments/previews-<port>.json` —
   written through a temp file and a rename, so a crash mid-write cannot lose it — and reloaded on
