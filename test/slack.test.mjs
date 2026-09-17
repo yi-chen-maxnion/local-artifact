@@ -450,3 +450,89 @@ describe('slack', () => {
     });
   });
 });
+
+/**
+ * Its own bridge and its own config directory, because the only way to fail a write from outside
+ * the daemon is to take the directory away - `writeFileAtomic` lays its temp file down next to the
+ * target - and the suite above shares one config directory that later tests still need to write.
+ */
+describe('a refresh Slack granted but the disk would not keep', () => {
+  let slack;
+  let bridge;
+  let key;
+  let config;
+
+  before(async () => {
+    slack = await startFakeSlack();
+    config = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-slack-ro-'));
+    bridge = await startBridge({
+      env: {
+        LOCAL_ARTIFACT_SLACK_API: slack.api,
+        LOCAL_ARTIFACT_SLACK_AUTHORIZE: slack.authorize,
+        LOCAL_ARTIFACT_SLACK_CLIENT_ID: '123.456',
+        LOCAL_ARTIFACT_CONFIG_DIR: config,
+      },
+    });
+    key = await register(bridge);
+    const start = await (await bridge.request('/slack/login', { json: {} })).json();
+    const state = new URL(start.url).searchParams.get('state');
+    await bridge.request(`/slack/callback?code=abc&state=${encodeURIComponent(state)}`, { token: null });
+  });
+  after(async () => {
+    // Whatever happened above, the directory has to be removable again.
+    try { fs.chmodSync(config, 0o700); } catch {}
+    await bridge.stop();
+    await slack.stop();
+    fs.rmSync(config, { recursive: true, force: true });
+  });
+
+  const share = async () => {
+    const res = await bridge.request('/preview', { json: { key, target: 'http://localhost:5173/' } });
+    return bridge.request('/slack/share', {
+      token: null,
+      headers: { origin: 'chrome-extension://abc' },
+      json: {
+        previewId: (await res.json()).previewId,
+        comment: 'make it blue',
+        dest: { id: 'C1', kind: 'channel', label: '#design-review' },
+        page: { url: 'http://localhost:5173/a' },
+      },
+    });
+  };
+
+  test('posts the comment anyway, and goes on working without the file', async () => {
+    const file = path.join(config, 'slack-token.json');
+    const t = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({
+      ...t, token: 'xoxp-stale', refreshToken: 'xoxe-1', expiresAt: Date.now() - 1000,
+    }), { mode: 0o600 });
+    slack.reset();
+
+    let res;
+    try {
+      fs.chmodSync(config, 0o500); // nothing new may be created here, so the atomic write's temp file fails
+      res = await share();
+    } finally {
+      fs.chmodSync(config, 0o700);
+    }
+
+    // The refresh token was spent on a token that works; the comment must not be what pays for
+    // the daemon being unable to write it down.
+    assert.equal(res.status, 200, 'the share is not lost');
+    assert.equal(
+      slack.calls.find((c) => c.method === 'chat.postMessage').auth,
+      'Bearer xoxp-test',
+      'and it posts with the token the refresh returned',
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(file, 'utf8')).token, 'xoxp-stale',
+      'the write really did fail - this is not a test that passes for the wrong reason',
+    );
+
+    // Held in memory, so the next share neither spends the dead refresh token nor asks for a login.
+    slack.reset();
+    assert.equal((await share()).status, 200);
+    assert.equal(slack.calls.filter((c) => c.method === 'oauth.v2.access').length, 0);
+    assert.equal(slack.calls.find((c) => c.method === 'chat.postMessage').auth, 'Bearer xoxp-test');
+  });
+});

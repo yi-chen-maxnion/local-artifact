@@ -126,10 +126,19 @@ function readToken() {
   return cached;
 }
 
+/**
+ * The two always move together: a token with no mtime to check it against is a token `readToken`
+ * could hand back long after the file said otherwise, so a stat that fails drops the cache rather
+ * than leaving half of it. 0 is never a real mtime, so the next read goes to the file.
+ */
+function cacheToken(t) {
+  cached = t;
+  try { cachedMtime = fs.statSync(TOKEN_FILE).mtimeMs; } catch { cached = null; cachedMtime = 0; }
+}
+
 function writeToken(t) {
   writeFileAtomic(TOKEN_FILE, `${JSON.stringify(t, null, 2)}\n`, 0o600);
-  cached = t;
-  try { cachedMtime = fs.statSync(TOKEN_FILE).mtimeMs; } catch { cached = null; }
+  cacheToken(t);
 }
 
 function forgetToken() {
@@ -172,13 +181,28 @@ async function ensureFresh() {
     throw Object.assign(new Error('the Slack connection has expired - run /slack login'), { status: 409, cause: e });
   }
   const a = j.authed_user || j;
-  writeToken({
+  const next = {
     ...t,
     token: a.access_token || t.token,
     refreshToken: a.refresh_token || t.refreshToken,
     expiresAt: a.expires_in ? Date.now() + a.expires_in * 1000 : null,
-  });
-  return cached.token;
+  };
+  try {
+    writeToken(next);
+  } catch (e) {
+    /**
+     * Slack has already rotated by the time this runs: the old refresh token is spent and this
+     * pair is the only one that still works. Refusing the call now would lose the comment the
+     * user is sharing for a token that is in hand, so the share goes ahead and the pair is kept
+     * in memory - pinned to the file that could not be replaced, so a login in another session
+     * still wins - and this daemon keeps working until it restarts. Stderr is the only place the
+     * bad news fits: `lastShare` is about to be overwritten by the share this was for.
+     */
+    cacheToken(next);
+    console.error(`slack: the refreshed token could not be saved (${e.message}) - it is lost when the bridge restarts`);
+  }
+  // From here rather than from `cached`, which a failed stat is allowed to have emptied.
+  return next.token;
 }
 
 // ---------------------------------------------------------------- login
