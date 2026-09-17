@@ -58,7 +58,9 @@
       // overlay believed capture would work and every screenshot silently timed out.
       chrome.runtime.sendMessage({ type, payload }, (res) => {
         const err = chrome.runtime.lastError;
-        reply(err ? { error: err.message } : res);
+        // A message-less `lastError` would otherwise be an answer with an empty `error`, which
+        // reads as success: a failure here always says something.
+        reply(err ? { error: err.message || 'the extension could not be reached - refresh this page' } : res);
       });
     } catch (err) {
       reply({ error: String(err?.message || err) });
