@@ -116,29 +116,34 @@ describe('cssSelector: the selector for an element finds that element, and only 
     test(name, () => assert.deepEqual(sweep(html), []));
   }
 
-  // BUG. `selectorStep` lowercases `tagName`, but a type selector is only case-insensitive for
-  // HTML elements: an element in the SVG namespace is matched case-sensitively, so `foreignobject`
-  // matches nothing at all. Every camelCase SVG tag - foreignObject, linearGradient, clipPath,
-  // textPath, feGaussianBlur - and everything inside one is therefore unanchorable unless it
-  // happens to carry an id. `localName` is already the correctly-cased name to use.
-  test('svg elements with camelCase tag names', { todo: 'selectorStep lowercases tagName, which never matches an SVG element' }, () => {
+  // A type selector is only case-insensitive for HTML elements: an element in the SVG namespace
+  // is matched case-sensitively, so a lowercased `foreignobject` matches nothing at all. Every
+  // camelCase SVG tag - foreignObject, linearGradient, clipPath, textPath, feGaussianBlur - and
+  // everything inside one, including the HTML a chart library embeds in a <foreignObject>, was
+  // unanchorable unless it happened to carry an id.
+  test('svg elements with camelCase tag names', () => {
     assert.deepEqual(sweep(
       '<div><svg><defs><linearGradient><stop offset="0"></stop></linearGradient>'
-      + '<linearGradient><stop offset="1"></stop></linearGradient></defs>'
-      + '<foreignObject><div>in</div></foreignObject></svg></div>',
+      + '<linearGradient><stop offset="1"></stop></linearGradient>'
+      + '<clipPath><rect></rect></clipPath></defs>'
+      + '<foreignObject><div class="label"><span>one</span><span>two</span></div></foreignObject>'
+      + '<foreignObject><div class="label"><span>three</span></div></foreignObject></svg></div>',
     ), []);
   });
 
-  test('a minimal reproduction of the svg case bug', () => {
+  test('the minimal svg case: the tag is spelled the way the page spells it', () => {
     const doc = setBody('<div><svg><foreignObject><b>x</b></foreignObject></svg></div>');
     const fo = doc.querySelector('foreignObject');
     // What the page agrees the element is called...
     assert.equal(fo.localName, 'foreignObject');
     assert.equal(doc.querySelectorAll('foreignObject').length, 1);
     assert.equal(doc.querySelectorAll('foreignobject').length, 0);
-    // ...and what the overlay writes down instead.
-    assert.equal(cssSelector(fo), 'body > div > svg > foreignobject');
-    assert.equal(doc.querySelectorAll(cssSelector(fo)).length, 0);
+    // ...is what the overlay writes down. Lowercased, this step matched zero elements, and the
+    // pin saved against it simply never came back.
+    assert.equal(selectorStep(fo), 'foreignObject');
+    assert.deepEqual([...doc.querySelectorAll(cssSelector(fo))], [fo]);
+    // The camelCase step is a step in the path of what is inside it, too.
+    assert.equal(domPath(fo.querySelector('b')), 'div > svg > foreignObject > b');
   });
 
   test('the page itself is never an anchor, and never a step in a path', () => {
@@ -366,6 +371,15 @@ describe('brief: the one line each element inside a region gets', () => {
     assert.equal(brief(doc.getElementById('i')).text, 'typed');
     assert.equal(brief(doc.getElementById('i')).placeholder, 'ph');
     assert.equal(brief(doc.getElementById('t')).text, 'wrote');
+  });
+
+  // format.mjs prints the tag and then the selector under it, skipping the second line when they
+  // are the same string - which they only are if both spell the tag the way the page does.
+  test('an svg element is tagged as the page spells it, like its selector', () => {
+    const doc = setBody('<svg><foreignObject><b>x</b></foreignObject></svg>');
+    const b = brief(doc.querySelector('foreignObject'));
+    assert.equal(b.tag, 'foreignObject');
+    assert.equal(b.selector, 'foreignObject');
   });
 
   test('text is cut at 80 characters, not 200', () => {

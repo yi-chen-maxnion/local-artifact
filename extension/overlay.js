@@ -257,7 +257,10 @@
     if (node.id && unique(`#${CSS.escape(node.id)}`)) return `#${CSS.escape(node.id)}`;
     const testid = node.getAttribute('data-testid');
     if (testid && unique(`[data-testid="${CSS.escape(testid)}"]`)) return `[data-testid="${CSS.escape(testid)}"]`;
-    let s = node.tagName.toLowerCase();
+    // `localName`, not a lowercased `tagName`: a type selector is case-insensitive only for HTML
+    // elements, so `foreignobject` matches no SVG element at all - and everything nested inside
+    // one, an HTML label in a chart's `<foreignObject>` included, is then unanchorable too.
+    let s = node.localName;
     const cls = ownClasses(node).filter(distinctClass).slice(0, 2);
     if (cls.length) s += '.' + cls.map((c) => CSS.escape(c)).join('.');
     const sibs = node.parentElement ? [...node.parentElement.children].filter((n) => n.tagName === node.tagName) : [];
@@ -286,7 +289,7 @@
     for (let n = el; n && n.nodeType === 1 && !isPage(n) && out.length < 8; n = n.parentElement) {
       const id = n.id ? `#${n.id}` : '';
       const cls = ownClasses(n).find(distinctClass);
-      out.unshift(n.tagName.toLowerCase() + id + (!id && cls ? `.${cls}` : ''));
+      out.unshift(n.localName + id + (!id && cls ? `.${cls}` : ''));
     }
     return out.join(' > ');
   };
@@ -299,7 +302,7 @@
   function brief(el) {
     const r = el.getBoundingClientRect();
     const testid = el.getAttribute('data-testid');
-    let tag = el.tagName.toLowerCase();
+    let tag = el.localName;
     const cls = ownClasses(el).find(distinctClass);
     if (el.id) tag += `#${el.id}`;
     else if (cls) tag += `.${cls}`;
