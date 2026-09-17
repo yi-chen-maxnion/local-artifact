@@ -44,6 +44,13 @@ says that page belongs to it, and the toolbar menu turns any origin off for good
 Reload it from `chrome://extensions` after editing anything in `extension/`, then refresh the
 pages you had open.
 
+**The extension talks to `127.0.0.1:4517` and nothing else.** `LOCAL_ARTIFACT_PORT` moves the
+daemon — for the test suite, or to get out of the way of something already on that port — but not
+the extension or the bookmarklet, both of which hold that origin as a literal. On another port the
+bridge still serves its own pages and comments still work from them; what stops is everything the
+extension does, silently: no page is resolved, no overlay is injected, and nothing says why. Leave
+the daemon on 4517 if you use the extension.
+
 ## Use
 
 | command | what it does |
@@ -132,7 +139,7 @@ Someone sets the app up once:
    do it before step 3.
 3. Add the redirect URL `http://localhost:4517/slack/callback`. Slack allows a `localhost`
    redirect for PKCE apps. (If you run the bridge on another port with `LOCAL_ARTIFACT_PORT`, add
-   that one too.)
+   that one too — but note that the extension itself only ever speaks to 4517, as above.)
 4. Put the app's **Client ID** in `slack-app.json` in this repo. It is not a secret, and there is
    no secret to distribute.
 

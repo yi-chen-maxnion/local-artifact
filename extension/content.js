@@ -11,6 +11,8 @@
  * A relay on any other page would hand every script on that page a line to the worker.
  */
 (() => {
+  // The bridge's exact origin, pinned: no other server on 127.0.0.1 gets a line to the worker. The
+  // other copies are background.js's BRIDGE and the README bookmarklet - test/extension.test.mjs.
   if (location.origin !== 'http://127.0.0.1:4517' || window.__ccRelay) return;
   window.__ccRelay = true;
 

@@ -12,6 +12,8 @@
  *   commenting on a deployed build works at all is that the request leaves from here, with the
  *   extension's host permissions, rather than from the page.
  */
+// Spelled out again in extension/content.js and in the README's bookmarklet, neither of which can
+// import it; test/extension.test.mjs is what holds the three copies together.
 const BRIDGE = 'http://127.0.0.1:4517';
 
 /**
