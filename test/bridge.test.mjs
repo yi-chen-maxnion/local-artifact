@@ -1,5 +1,6 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { comment, listen, preview, register, startBridge } from './helpers.mjs';
@@ -421,6 +422,141 @@ describe('more comments in a minute than a session will take', () => {
     const third = await b.next();
     assert.equal(third.n, 1);
     assert.equal(third.seq, 3); // not 4 - the refusal never reached ++seq
+  });
+});
+
+/**
+ * The watermark a monitor holds from its first second.
+ *
+ * A monitor's position used to be the sequence number of the last comment it PRINTED, so a
+ * session whose first comment had not arrived yet was at 0 - indistinguishable from one that had
+ * just started, and 0 is the number that asks for nothing. Every comment accepted into a stream
+ * that had already died was therefore lost on the reconnect that was supposed to recover it. The
+ * daemon now says where it has got to in its hello, and answers `from=` for a monitor that has a
+ * position of its own - including when that position is 0.
+ */
+describe('a monitor that has never printed a comment', () => {
+  const page = { url: 'http://localhost:7500/a' };
+  let bridge;
+  let key;
+  let other;
+  let previewId;
+  let otherPreview;
+  // What keeps each session deliverable while the monitors under test come and go: this daemon
+  // has no grace window, so with nothing on the stream /comment would refuse rather than buffer.
+  let sentinel;
+  let otherSentinel;
+
+  before(async () => {
+    bridge = await startBridge();
+    key = await register(bridge);
+    other = await register(bridge, `p${process.pid}1`);
+    sentinel = await listen(bridge, key);
+    otherSentinel = await listen(bridge, other);
+    ({ previewId } = await preview(bridge, key, 'http://localhost:7500/'));
+    ({ previewId: otherPreview } = await preview(bridge, other, 'http://localhost:7501/'));
+  });
+  after(async () => {
+    await sentinel.close();
+    await otherSentinel.close();
+    await bridge.stop();
+  });
+
+  const send = (text, pv = previewId) => comment(bridge, pv, { comment: text, page });
+  /**
+   * The next comment, waited for with an end to it: a replay that never comes is the failure this
+   * whole section is about, and it has to read as one rather than as a test that never returns.
+   * Both halves of the race settle, so nothing is left to reject unhandled when the stream closes.
+   */
+  const waiting = (l) => l.next().then((p) => p.comment, (e) => `the stream ended: ${e.message}`);
+  const later = (ms, value) => new Promise((r) => setTimeout(r, ms, value));
+  const soon = async (l) => {
+    const late = Symbol('late');
+    const got = await Promise.race([waiting(l), later(2000, late)]);
+    assert.notEqual(got, late, 'nothing was delivered on the stream');
+    return got;
+  };
+  const texts = async (l, n) => {
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(await soon(l));
+    return out;
+  };
+  /**
+   * Nothing arrives within `ms`. There is no positive evidence of a comment not being replayed,
+   * so the wait is the assertion; it is short because the replay is written before the response
+   * body's first chunk, which the listener has already read.
+   */
+  const silent = async (l, ms = 150) => {
+    const quiet = Symbol('quiet');
+    return await Promise.race([waiting(l), later(ms, quiet)]) === quiet;
+  };
+
+  test('the hello says where the daemon has got to', async () => {
+    assert.equal(sentinel.hello.seq, 0); // nothing numbered yet, and 0 is a real answer
+    assert.equal((await send('one')).status, 200);
+    const fresh = await listen(bridge, key);
+    assert.equal(fresh.hello.seq, 1);
+    await fresh.close();
+  });
+
+  test('from=0 replays this session, and only this session', async () => {
+    assert.equal((await send('two')).status, 200);
+    assert.equal((await send('theirs', otherPreview)).status, 200);
+    const all = await listen(bridge, key, { from: 0 });
+    assert.deepEqual(await texts(all, 2), ['one', 'two']);
+    assert.ok(await silent(all), 'the other session\'s comment was replayed into this one');
+    await all.close();
+  });
+
+  test('from=N replays only what came after it', async () => {
+    const later = await listen(bridge, key, { from: 1 });
+    assert.deepEqual(await texts(later, 1), ['two']);
+    assert.ok(await silent(later));
+    await later.close();
+  });
+
+  test('since=0 still sends nothing, which is what a monitor from before from= means by it', async () => {
+    const old = await listen(bridge, key, { since: 0 });
+    assert.ok(await silent(old));
+    await old.close();
+  });
+
+  test('a comment accepted while a monitor was away arrives when it comes back', async () => {
+    // The monitor of situation three: attached, told nothing, and away again - its watermark is
+    // where the daemon was when it said hello, and nothing has moved it since.
+    const away = await listen(bridge, key);
+    const at = away.hello.seq;
+    await away.close();
+    assert.equal((await send('while you were out')).status, 200);
+
+    const back = await listen(bridge, key, { from: at });
+    assert.deepEqual(await texts(back, 1), ['while you were out']);
+    await back.close();
+
+    // The same reconnect as it was: a watermark of 0 asking the only way it could, and being
+    // told there is nothing. That is the comment this whole section is about losing.
+    const asBefore = await listen(bridge, key, { since: 0 });
+    assert.ok(await silent(asBefore));
+    await asBefore.close();
+  });
+
+  /**
+   * The monitor's watermark is the one piece of a session's state the daemon does not write, and
+   * the monitor cannot be the one to clear it - the file exists precisely because that process may
+   * not come back. So the daemon takes it along with everything else the session owned. What this
+   * bounds is the session key itself: it is a pid, pids come round again, and a watermark left
+   * behind would be read by whoever is handed that pid next.
+   */
+  test('the watermark goes with the session the daemon prunes', async () => {
+    const ended = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+    const mine = `p${ended.pid}`;
+    await bridge.request('/register', { json: { key: mine, pid: ended.pid, cwd: '/tmp/repo', repo: 'repo' } });
+    const file = path.join(bridge.stateDir, `watermark-${bridge.port}-${mine}.json`);
+    fs.writeFileSync(file, JSON.stringify({ instance: 'whatever', seq: 3, born: 'then' }));
+    await new Promise((resolve) => { ended.once('exit', resolve); ended.kill(); });
+
+    await bridge.request('/health'); // which prunes
+    assert.equal(fs.existsSync(file), false);
   });
 });
 

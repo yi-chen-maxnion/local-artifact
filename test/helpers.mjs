@@ -121,21 +121,33 @@ export function comment(bridge, previewId, { headers, ...fields } = {}) {
  * A monitor on this session's stream. Attaching one is what makes a comment deliverable at all -
  * see `listening()` in bridge/server.mjs - so a test that expects /comment to be taken needs one.
  *
+ * `from` and `since` play a monitor that is reconnecting rather than starting: `from` is what a
+ * current monitor asks with once it holds a watermark, `since` what one from before that asks
+ * with. Neither is sent unless a test names it, which is what a monitor starting fresh does.
+ * `hello` is the daemon's own greeting, whose `seq` is the watermark a new monitor adopts.
+ *
  * `next()` reads the way scripts/monitor.mjs reads: frames buffered across reads, split on the
  * blank line, parsed by `parseFrame`. Never by a regex - `.` stops at the U+2028 that
  * JSON.stringify emits raw, which is the whole reason lib/sse.mjs exists.
  */
-export async function listen(bridge, key) {
-  const events = await fetch(`${bridge.origin}/events?session=${key}`, {
+export async function listen(bridge, key, { from, since } = {}) {
+  const at = [from === undefined ? '' : `&from=${from}`, since === undefined ? '' : `&since=${since}`].join('');
+  const events = await fetch(`${bridge.origin}/events?session=${key}${at}`, {
     headers: { 'x-cc-token': bridge.token },
   });
   const reader = events.body.getReader();
   const dec = new TextDecoder();
   // Into the same buffer `next` reads from, so nothing that shared the hello frame's chunk is lost.
   let buf = dec.decode((await reader.read()).value, { stream: true });
-  assert.ok(buf.includes('event: hello'), buf);
+  const end = buf.indexOf('\n\n');
+  assert.notEqual(end, -1, buf);
+  const greeting = parseFrame(buf.slice(0, end));
+  assert.equal(greeting.event, 'hello', buf);
+  // Consumed here so a replay sharing this chunk is all `next` ever sees.
+  buf = buf.slice(end + 2);
 
   return {
+    hello: JSON.parse(greeting.data),
     /** The next delivered comment event, as the session's monitor would receive it. */
     next: async () => {
       for (;;) {

@@ -649,10 +649,23 @@ const server = http.createServer(async (req, res) => {
       // errors, nothing closes, and the stream is silently dead. TCP keepalive is the layer
       // that eventually notices; the client-side watchdog is what makes it quick.
       res.socket?.setKeepAlive?.(true, 15000);
-      res.write(`event: hello\ndata: ${JSON.stringify({ origin: ORIGIN, pid: process.pid, instance: INSTANCE })}\n\n`);
-      for (const missed of store.since(key, Number(url.searchParams.get('since') || 0))) {
-        res.write(`event: comment\ndata: ${JSON.stringify(missed)}\n\n`);
-      }
+      /**
+       * `seq` is what a monitor with no watermark of its own adopts as one: everything up to it is
+       * history it is not owed, everything after it is. That only holds if nothing numbered at or
+       * below it can still be written to this stream and nothing above it can be missed - so the
+       * hello, the replay and the registration below are one synchronous run. A `/comment` awaits
+       * its body before it reaches `++seq`, so it cannot land in the middle of them.
+       */
+      res.write(`event: hello\ndata: ${JSON.stringify({
+        origin: ORIGIN, pid: process.pid, instance: INSTANCE, seq,
+      })}\n\n`);
+      // `from` is the honest form of the question and the only one that can say "past zero";
+      // `since` is what monitors from before it ask, and means nothing at 0. See store.since.
+      const from = url.searchParams.get('from');
+      const missed = from === null
+        ? store.since(key, Number(url.searchParams.get('since')) || 0)
+        : store.after(key, Number(from) || 0);
+      for (const m of missed) res.write(`event: comment\ndata: ${JSON.stringify(m)}\n\n`);
       if (!clients.has(key)) clients.set(key, new Set());
       clients.get(key).add(res);
       const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, PING_MS);

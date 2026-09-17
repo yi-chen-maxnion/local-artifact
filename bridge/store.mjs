@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { ensureScratch, scratchDir } from '../lib/common.mjs';
+import { ensureScratch, scratchDir, watermarkFile } from '../lib/common.mjs';
 
 const REPLAY_MAX = 50;
 
@@ -93,17 +93,32 @@ export class Store {
     this.#replay.set(sessionKey, buf);
   }
 
-  /** Events a reconnecting monitor has not seen yet. */
+  /** Everything buffered past `from` - what a monitor holding a real watermark is owed. */
+  after(sessionKey, from) {
+    return (this.#replay.get(sessionKey) || []).filter((p) => p.seq > from);
+  }
+
+  /**
+   * The same question asked the old way, where 0 means "I am new, send me nothing".
+   *
+   * That conflation is why `after` exists: a monitor is at 0 both when it has never seen this
+   * daemon and when it has been attached for hours without a comment to print. It stays exactly
+   * as it is because monitors outlive daemon upgrades, and one that still asks this way must keep
+   * getting nothing rather than a replay of what its predecessor already printed.
+   */
   since(sessionKey, lastSeq) {
-    const buf = this.#replay.get(sessionKey) || [];
-    if (!lastSeq) return [];
-    return buf.filter((p) => p.seq > lastSeq);
+    return lastSeq ? this.after(sessionKey, lastSeq) : [];
   }
 
   forget(sessionKey) {
     this.#replay.delete(sessionKey);
     try {
       fs.rmSync(scratchDir(sessionKey), { recursive: true, force: true });
+    } catch {}
+    // The monitor's watermark outlives the monitor on purpose, so the session ending is the only
+    // thing that can clear it - otherwise a pid handed out again inherits a stale one.
+    try {
+      fs.rmSync(watermarkFile(sessionKey), { force: true });
     } catch {}
   }
 }

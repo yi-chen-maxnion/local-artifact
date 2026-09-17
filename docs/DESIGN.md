@@ -864,8 +864,55 @@ takes, so there is only one recovery route to trust:
 
 TCP keepalive is set on the server side of the same socket, which is the layer that eventually
 notices a peer that went away; the client-side watchdog is what makes it quick. On reconnect the
-monitor re-registers and replays from its last sequence number, so a comment sent while the
-stream was dead still arrives.
+monitor re-registers and asks for everything past its watermark, so a comment accepted while the
+stream was dead is delivered once the stream is back.
+
+**That watermark used to be a number the monitor could not honestly hold.** It was the sequence
+number of the last comment the monitor had *printed*, and the only writer of it was the print
+itself — so it was 0 for a monitor that had just started, 0 for one that had just met a restarted
+daemon, and 0 for one that had been attached for hours and simply never had a comment to print.
+The third is every session before its first comment, which made the first comment of a session the
+one the reconnect could not recover: the socket died silently, `/comment` wrote into it and
+answered `200`, the page drew its pin, and the replay seventy seconds later was empty. The same
+zero also cost every comment accepted while a monitor *process* was being restarted — the host
+stops and re-arms it within one session — since the replacement started from nothing.
+
+So the daemon says where it has got to. Its `hello` carries the current sequence number, and a
+monitor with no position of its own adopts it: everything numbered before that hello is history it
+was never owed, everything after it is. From its first second the monitor has a real watermark,
+even when that watermark is numerically 0. Adopting it is only sound because the daemon writes the
+hello, the replay and the stream's registration in one synchronous run — a `/comment` waits on its
+request body before it reaches the counter, so it cannot be numbered in between and fall through
+the gap.
+
+**"Everything after 0" then has to be expressible, and `since=0` cannot say it.** Its meaning was
+not changed, because a monitor is not upgraded when the daemon is: the daemon is replaced on the
+next `/preview`, while a monitor lives as long as its session — days, against a daemon that is
+minutes old. An old monitor sends `since=0` on every fresh start and must keep getting nothing; if
+0 had been redefined, its first reconnect after the upgrade would replay fifty comments its
+predecessor had already printed into the session. `/events` therefore answers a second parameter,
+`from=<seq>`, which means exactly what it says — every buffered event numbered above it, zero
+included — and `since` is left as the thing old monitors already believe it to be.
+
+**The watermark is written to disk, because the monitor process is not the durable thing here.**
+It goes to `$TMPDIR/claude-ui-comments/watermark-<port>-<session>.json` on every delivered
+comment — human-paced, a few hundred bytes — and deliberately *not* into the session's scratch
+directory, which the monitor deletes in its own `SIGTERM` handler: a watermark kept there would be
+erased by precisely the event it exists to survive. It is read back only when the daemon's
+`instance` matches, since a sequence number means nothing outside the daemon that issued it, and
+only when the session's process started when the file says it did. That second check is about pid
+reuse: the session key *is* the `claude` pid, and a pid handed out again would otherwise inherit a
+stale watermark and be read comments belonging to whoever held it before. The daemon deletes the
+file when it prunes the session, so in the ordinary case it is gone before the pid can come round
+again.
+
+**What this does not fix.** A comment accepted into a dead socket now *arrives* — after the
+reconnect, up to seventy seconds later. It does not make the page's "sent" true at the moment the
+pin is drawn, and a monitor that never comes back still loses it: the daemon has no
+acknowledgement from the far end to wait for, so it cannot tell a comment that was read from one
+that was merely written into a socket. Closing that would mean the monitor acknowledging each
+sequence number and `/comment` answering only once it had — a real handshake, and a separate
+change.
 
 The daemon itself survives sleep — it idle-exits only when no registered session's process is
 still alive, and sleeping does not end a process. What does kill it is the Claude session ending:

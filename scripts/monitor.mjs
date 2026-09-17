@@ -6,8 +6,11 @@
  * It deliberately does NOT start the bridge daemon - /preview does that. Until one is up it
  * costs one small process and a retry timer, nothing more.
  */
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import { ORIGIN, PING_MS, bridge, readToken, resolveSession, scratchDir, sleep } from '../lib/common.mjs';
+import {
+  ORIGIN, PING_MS, bridge, readToken, resolveSession, scratchDir, sleep, watermarkFile, writeFileAtomic,
+} from '../lib/common.mjs';
 import { fmt } from '../lib/format.mjs';
 import { parseFrame } from '../lib/sse.mjs';
 
@@ -40,8 +43,60 @@ const STALE_MS = 2 * PING_MS + 20000; // two missed pings plus slack
  */
 const WAKE_JUMP_MS = 20000;
 
-let lastSeq = 0;
+const WATERMARK = watermarkFile(session.key);
+/**
+ * When the session's claude process started, as `ps` prints it.
+ *
+ * The watermark has to outlive this process - the host stops and re-arms the monitor within one
+ * session - so it cannot live in the scratch directory this process deletes on its way out, and
+ * nothing the monitor does can be trusted to clean it up. The daemon removes it when the session
+ * is pruned; until then the only thing that tells this session apart from the next process handed
+ * the same pid is when that process began.
+ */
+const born = (() => {
+  try {
+    return execFileSync('ps', ['-o', 'lstart=', '-p', String(session.pid)], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+})();
+
+/** What a previous monitor of this same session left behind, or null. Read once, used once. */
+let saved = (() => {
+  try {
+    const w = JSON.parse(fs.readFileSync(WATERMARK, 'utf8'));
+    // A sequence number means nothing outside the daemon that issued it, and a watermark means
+    // nothing outside the session incarnation that reached it.
+    return Number.isFinite(w.seq) && w.instance && born && w.born === born ? w : null;
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * How far this session has been read, and by which daemon.
+ *
+ * `null` means no watermark at all - true only until the first hello, and only for a monitor with
+ * nothing on disk. It is deliberately not 0, because 0 is a real watermark: a daemon that has
+ * handed out no sequence numbers owes this session every number it will hand out. Conflating the
+ * two is what lost the first comment of every session - a monitor attached for hours that had
+ * never printed anything asked for a replay "from 0", which the old parameter reads as "I am new,
+ * send me nothing".
+ */
+let lastSeq = saved ? saved.seq : null;
 let instance = null;
+/**
+ * Which parameter says "everything after my watermark". Above zero the two are the same question,
+ * so a watermark restored from disk is asked for the way a daemon of any age understands it; only
+ * 0 needs `from`, and only a daemon new enough to answer it has `seq` in its hello.
+ */
+let fromSupported = lastSeq === 0;
+
+function remember() {
+  try { writeFileAtomic(WATERMARK, JSON.stringify({ instance, seq: lastSeq, born })); } catch {}
+}
 
 /**
  * Nothing is rate-limited here. A flood is refused by the daemon instead, per session and at the
@@ -54,14 +109,20 @@ let instance = null;
  * when it was sent, and dropping them here is exactly the silent loss being fixed.
  */
 function emit(p) {
-  if (p.seq <= lastSeq) return;
+  if (lastSeq !== null && p.seq <= lastSeq) return;
   lastSeq = p.seq;
   process.stdout.write(fmt(p)); // one write => one batched notification
+  // After the write, never before it: a crash between the two costs a duplicate notification,
+  // and a duplicate is something the reader can see. The other order costs the comment itself.
+  remember();
 }
 
 async function connect() {
   const ac = new AbortController();
-  const res = await fetch(`${ORIGIN}/events?session=${encodeURIComponent(session.key)}&since=${lastSeq}`, {
+  // Neither parameter until there is a watermark - the daemon's own `seq` is about to supply one,
+  // and asking for a replay before then would mean asking for history this session never lost.
+  const at = lastSeq === null ? '' : `&${fromSupported ? 'from' : 'since'}=${lastSeq}`;
+  const res = await fetch(`${ORIGIN}/events?session=${encodeURIComponent(session.key)}${at}`, {
     // Read on every attempt: a restarted daemon has a new token.
     headers: { accept: 'text/event-stream', 'x-cc-token': readToken() },
     signal: ac.signal,
@@ -94,14 +155,26 @@ async function connect() {
         const { event, data } = parseFrame(frame);
         if (data === undefined) continue; // a ping, or anything else without a payload
         if (event === 'hello') {
-          // A restarted daemon starts its numbering over. Without this reset every event it
-          // sends would look like one already seen, and be dropped without a trace.
           try {
             const hello = JSON.parse(data);
+            // A restarted daemon starts its numbering over - and it kept nothing to replay, so
+            // there is no watermark of ours left worth holding. Without dropping it, every event
+            // the new daemon sends would look like one already seen and go without a trace.
             if (hello.instance && hello.instance !== instance) {
               instance = hello.instance;
-              lastSeq = 0;
+              lastSeq = null;
             }
+            // A daemon from before `from=`: no watermark to adopt, so fall back to asking the only
+            // way it understands, which is what this file did before any of this existed.
+            fromSupported = hello.seq !== undefined;
+            if (lastSeq === null) {
+              // Adopt, in order of authority: what a previous monitor of this session printed up
+              // to, then the daemon's own position - everything numbered before this hello is
+              // history this session was never owed, everything after it will be delivered.
+              lastSeq = saved?.instance === instance ? saved.seq : (fromSupported ? hello.seq : 0);
+              remember();
+            }
+            saved = null; // it answers the first hello and nothing later
           } catch {}
           continue;
         }
