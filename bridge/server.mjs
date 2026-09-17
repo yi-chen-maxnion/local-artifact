@@ -273,7 +273,7 @@ function broadcast(sessionKey, payload) {
 }
 
 // Single canonical copies: the extension packages these, and the bridge serves the same files.
-const SCRIPTS = new Map([['/overlay.js', 'overlay.js'], ['/console-hook.js', 'console-hook.js']]);
+const SCRIPTS = new Set(['/overlay.js', '/console-hook.js']);
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, ORIGIN);
@@ -464,7 +464,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (SCRIPTS.has(p)) {
-      const buf = readIfFile(path.join(ROOT, 'extension', SCRIPTS.get(p)));
+      const buf = readIfFile(path.join(ROOT, 'extension', p.slice(1)));
       if (!buf) return json(res, 404, { error: 'missing' });
       return send(res, 200, contentType(p), buf, { 'access-control-allow-origin': '*' });
     }
