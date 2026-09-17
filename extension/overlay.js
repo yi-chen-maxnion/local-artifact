@@ -2491,6 +2491,9 @@
       if (!p._button) {
         p._button = document.createElement('button');
         p._button.className = 'pin';
+  /** Whether the last render had anything on this page. Starts true, so the first one always runs. */
+  let anyShown = true;
+
         p._button.textContent = p.n;
       }
       const d = p._button;
@@ -2498,6 +2501,15 @@
       d.classList.toggle('active', state.viewing === p);
       if (state.fresh === p) d.classList.add('in');
       d.style.left = `${spot.x}px`;
+    // Nearly every page, nearly always, has nothing of ours on it - and this runs once a frame for
+    // as long as anything on the page is scrolling. With nothing shown last time and nothing to
+    // show now there is nothing to clear either, so stop before the sweeps, the counting and the
+    // three titles. Whether there is anything here is counted live every time rather than
+    // remembered: `pins` is the whole origin's list and `pageKey()` moves under an SPA with no
+    // event we hear, so a cached answer would be wrong on the route it matters on - and a walk of
+    // at most 100 entries is the cheap half of this function. An open list is never skipped: it
+    // prints `here` itself, so it has to follow a route change from nothing to nothing.
+    if (!anyShown && !state.listOpen && !pins.some((p) => p.page === here)) return;
       d.style.top = `${spot.y}px`;
       if (d.parentNode !== el.pins) el.pins.appendChild(d);
       drawn.add(d);
@@ -2529,6 +2541,7 @@
   }
 
   /** A link struck through - the anchor this comment was tied to is not on the page. */
+    anyShown = n > 0; // what the guard at the top reads: everything below writes the empty state
   const LOST_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" '
     + 'stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7M15 '
     + '7h2a5 5 0 0 1 4 8M8 12h4M3 3l18 18"/></svg>';
