@@ -2,6 +2,7 @@ import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseFrame } from '../lib/sse.mjs';
 import { register, startBridge } from './helpers.mjs';
 
 describe('bridge', () => {
@@ -291,6 +292,108 @@ describe('a session with nothing listening', () => {
     assert.equal(sent.status, 200);
     assert.match(new TextDecoder().decode((await reader.read()).value), /anyone there\?/);
     await reader.cancel();
+  });
+});
+
+/**
+ * A screenshot the daemon cannot park on disk - a scratch directory the OS cleaned out from
+ * under it, a full disk - used to take the whole comment down with it. The comment is the thing
+ * the user typed; the picture is a nicety, and its absence is already something the notification
+ * knows how to explain.
+ */
+describe('a screenshot the bridge cannot save', () => {
+  // The smallest thing `decodeShot` accepts: a 1x1 PNG.
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+    + 'AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  let bridge;
+  let key;
+  let reader;
+  let previewId;
+  const dec = new TextDecoder();
+  let buf = '';
+
+  before(async () => {
+    // No grace window: a listener of our own is what makes the comment deliverable, and it is
+    // also how the delivered event is read back.
+    bridge = await startBridge({ env: { LOCAL_ARTIFACT_LISTEN_GRACE_MS: '0' } });
+    key = await register(bridge);
+    const events = await fetch(`${bridge.origin}/events?session=${key}`, {
+      headers: { 'x-cc-token': bridge.token },
+    });
+    reader = events.body.getReader();
+    // Into the same buffer `delivered` reads from, so nothing that shared the chunk is dropped.
+    buf += dec.decode((await reader.read()).value, { stream: true });
+    assert.ok(buf.includes('event: hello'), buf);
+    const res = await bridge.request('/preview', { json: { key, target: 'http://localhost:7300/' } });
+    previewId = (await res.json()).previewId;
+  });
+  after(async () => {
+    await reader.cancel();
+    await bridge.stop();
+  });
+
+  const send = (extra = {}) => bridge.request('/comment', {
+    token: null,
+    json: {
+      previewId, comment: 'look at this', page: { url: 'http://localhost:7300/a' },
+      screenshot: PNG, ...extra,
+    },
+  });
+
+  /**
+   * The next delivered comment event, as the session's monitor would receive it: frames buffered
+   * across reads and parsed the way scripts/monitor.mjs parses them. A regex over one chunk is
+   * what `lib/sse.mjs` exists to replace - `.` stops at the U+2028 that JSON.stringify emits raw.
+   */
+  const delivered = async () => {
+    for (;;) {
+      let i;
+      while ((i = buf.indexOf('\n\n')) !== -1) {
+        const { event, data } = parseFrame(buf.slice(0, i));
+        buf = buf.slice(i + 2);
+        if (event === 'comment' && data !== undefined) return JSON.parse(data);
+      }
+      const { value, done } = await reader.read();
+      if (done) throw new Error('the stream ended');
+      buf += dec.decode(value, { stream: true });
+    }
+  };
+
+  test('is still delivered, with the reason in place of the path', async () => {
+    // The control: nothing sabotaged, so the same request writes a real file.
+    const ok = await send();
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).shot, true);
+    const first = await delivered();
+    assert.ok(fs.existsSync(first.shot), first.shot);
+    assert.equal(first.capture, undefined);
+
+    // A file where the scratch DIRECTORY has to be: the mkdir inside writeShot cannot succeed.
+    const scratch = path.join(bridge.stateDir, key);
+    fs.rmSync(scratch, { recursive: true, force: true });
+    fs.writeFileSync(scratch, 'in the way');
+    try {
+      const res = await send();
+      const body = await res.json();
+      assert.equal(res.status, 200, JSON.stringify(body));
+      assert.equal(body.shot, false);
+      const event = await delivered();
+      assert.equal(event.shot, null);
+      assert.equal(event.capture.bridge, true);
+      assert.match(event.capture.error, /^EEXIST: file already exists$/);
+    } finally {
+      fs.rmSync(scratch, { force: true });
+    }
+  });
+
+  // `bridge` is the daemon's word about its own disk, and /comment is a route pages call.
+  test('a page cannot claim the bridge failed', async () => {
+    const res = await send({ screenshot: null, capture: { bridge: true, extension: false, error: 'x' } });
+    assert.equal(res.status, 200);
+    const event = await delivered();
+    assert.equal(event.capture.bridge, undefined);
+    // What the overlay does send still arrives as it was.
+    assert.deepEqual(event.capture, { extension: false, error: 'x' });
   });
 });
 

@@ -545,12 +545,34 @@ const server = http.createServer(async (req, res) => {
       const page = pageKey(b.page?.url || '');
       const n = store.next(b.previewId, page, b.after);
       const at = ++seq;
-      const shot = store.writeShot(pv.sessionKey, b.previewId, at, b.screenshot);
+      let shot = null;
+      // Reduced to the two fields the overlay sends, because `bridge` below is the daemon's own
+      // word about its own disk and a page must not be able to put it there: /comment is called
+      // from the page world, and a comment that blamed the bridge for a failure that never
+      // happened would send someone to debug the one component that did its job.
+      let capture = b.capture ? {
+        extension: Boolean(b.capture.extension),
+        error: b.capture.error ? String(b.capture.error).slice(0, 300) : undefined,
+      } : undefined;
+      try {
+        shot = store.writeShot(pv.sessionKey, b.previewId, at, b.screenshot);
+      } catch (e) {
+        // The comment is the valuable thing; the picture is a nicety. A scratch directory the OS
+        // cleaned out, a full disk, a mode we cannot write to - none of them is a reason to refuse
+        // a comment the user has already typed. It arrives with the reason in place of the shot.
+        //
+        // Node puts the useful half of the message first - "ENOSPC: no space left on device,
+        // write '…'" - and what follows the comma is a scratch path nobody reading the
+        // notification can act on.
+        const why = String(e.message).split(',')[0];
+        capture = { bridge: true, error: why };
+        console.error(`shot: ${why}`);
+      }
       const payload = {
         seq: at, n, previewId: b.previewId, ts: new Date().toISOString(),
         repo: sessions.get(pv.sessionKey)?.repo || '', target: pv.target,
         comment: text, page: b.page || {}, anchor: b.anchor || {}, console: b.console || [], shot,
-        capture: shot ? undefined : b.capture,
+        capture: shot ? undefined : capture,
       };
       broadcast(pv.sessionKey, payload);
       saveState();

@@ -23,6 +23,18 @@ test('says there was no extension, and prints a shot path when there is one', ()
   assert.doesNotMatch(withShot, /none -/);
 });
 
+// The extension captured it and the daemon could not park it next to the session: neither of the
+// two phrasings above is true of that, and one of them names the wrong component.
+test('says when the picture was taken but the bridge could not keep it', () => {
+  const out = fmt({
+    ...base,
+    anchor: { kind: 'element' },
+    capture: { bridge: true, error: 'ENOSPC: no space left on device' },
+  });
+  assert.match(out, /^shot {4}none - the bridge could not save it: ENOSPC: no space left on device$/m);
+  assert.doesNotMatch(out, /extension/);
+});
+
 test('renders each anchor kind', () => {
   const header = fmt({ ...base, anchor: {} }).split('\n')[0];
   assert.equal(header, '[ui-comment #3 · web · abcdef]');
