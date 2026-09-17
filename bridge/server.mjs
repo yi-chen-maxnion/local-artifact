@@ -404,6 +404,26 @@ const server = http.createServer(async (req, res) => {
       if (!origin) return json(res, 400, { error: 'origin required' });
       // Pages the bridge serves carry their own preview id; there is nothing to resolve.
       if (origin === ORIGIN) return json(res, 404, { error: 'bridge pages are bound by the bridge' });
+      // Whether the panel offers to post to Slack at all, and under whose name. Never a token.
+      // Asked for only once there is an answer to attach it to: this route runs on every page load.
+      const slackFor = () => {
+        const s = slack.status();
+        return s.connected ? { connected: true, user: s.user } : { connected: false };
+      };
+      /**
+       * A tab that carries `#cc=` is already bound and is asking only what goes with that id: the
+       * tab /preview opened, and the way one tab is pinned to a session while several are running.
+       * Answering with whoever claimed this origin last would label it with the wrong session's
+       * repo, so an id that is not live on this origin is a miss rather than a fallback.
+       */
+      const wanted = url.searchParams.get('preview');
+      if (wanted) {
+        const pv = previews.get(wanted);
+        if (!pv || pv.origin !== origin || !sessions.has(pv.sessionKey)) {
+          return json(res, 404, { error: 'no live preview with that id on this origin' });
+        }
+        return json(res, 200, { previewId: wanted, repo: sessions.get(pv.sessionKey).repo, slack: slackFor() });
+      }
       const key = ownerOf(origin);
       const found = key && originPreview(key, origin);
       if (!found) {
@@ -413,12 +433,10 @@ const server = http.createServer(async (req, res) => {
         });
       }
       if (found.created) saveState();
-      const s = slack.status();
       return json(res, 200, {
         previewId: found.previewId,
         repo: sessions.get(key).repo,
-        // Whether the panel offers to post to Slack at all, and under whose name. Never a token.
-        slack: s.connected ? { connected: true, user: s.user } : { connected: false },
+        slack: slackFor(),
       });
     }
 

@@ -42,17 +42,25 @@ const originOf = (url) => {
   } catch { return null; }
 };
 
-/** Who owns this origin, per the bridge. Cached briefly - this runs on every page load. */
-async function resolveOrigin(origin) {
-  const hit = resolved.get(origin);
+/**
+ * Who owns this origin, per the bridge. Cached briefly - this runs on every page load.
+ *
+ * `previewId` asks about one particular preview instead: the tab /preview opened knows which
+ * session it belongs to, and only wants what goes with it. Cached under its own key, since the
+ * answer is a different session's when two have opened this origin.
+ */
+async function resolveOrigin(origin, previewId = null) {
+  const key = previewId ? `${origin}#${previewId}` : origin;
+  const hit = resolved.get(key);
   const ttl = hit?.value ? RESOLVE_TTL : RESOLVE_MISS_TTL;
   if (hit && Date.now() - hit.at < ttl) return hit.value;
   let value = null;
   try {
-    const r = await fetch(`${BRIDGE}/resolve?origin=${encodeURIComponent(origin)}`);
+    const q = previewId ? `&preview=${encodeURIComponent(previewId)}` : '';
+    const r = await fetch(`${BRIDGE}/resolve?origin=${encodeURIComponent(origin)}${q}`);
     if (r.ok) value = await r.json();
   } catch {}
-  resolved.set(origin, { at: Date.now(), value });
+  resolved.set(key, { at: Date.now(), value });
   return value;
 }
 
@@ -70,11 +78,24 @@ async function ensureBound(tabId, url) {
 
   const fromHash = /[#&]cc=([a-f0-9]{8,})/.exec(url)?.[1] || null;
   let binding = bound.get(tabId);
-  if (fromHash && binding?.previewId !== fromHash) binding = { previewId: fromHash, repo: '', origin };
-  if (!binding || binding.origin !== origin) {
-    const found = fromHash ? { previewId: fromHash, repo: '' } : await resolveOrigin(origin);
-    if (!found) return null;
-    binding = { previewId: found.previewId, repo: found.repo || '', origin, slack: found.slack || null };
+  if (!binding || binding.origin !== origin || (fromHash && binding.previewId !== fromHash)) {
+    // The hash still decides which session the tab belongs to; the lookup is only for the rest of
+    // the binding. It asks about that id in particular, because a tab pinned to one session on an
+    // origin another session has since opened would otherwise be labelled with the other's repo -
+    // and a tab opened by /preview, the one case the hash exists for, was labelled with nothing.
+    const answer = await resolveOrigin(origin, fromHash);
+    if (!fromHash && !answer) return null;
+    // A daemon from older code does not know `preview` and answers about the origin instead, which
+    // is the one answer that must not be believed here: it is the other session's, and this tab
+    // would be labelled with its repo until the next /preview replaces the daemon. An answer that
+    // is not about the id asked for is a miss, and a miss is what a pinned tab always got before.
+    const found = fromHash && answer?.previewId !== fromHash ? null : answer;
+    binding = {
+      previewId: fromHash || found.previewId,
+      repo: found?.repo || '',
+      origin,
+      slack: found?.slack || null,
+    };
   } else {
     // Slack may have been connected - or dropped - since this tab was first bound, and the
     // panel decides whether to offer it at injection time. The lookup is cached, so this costs
