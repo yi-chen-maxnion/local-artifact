@@ -311,7 +311,8 @@ What still needs a restart either way: `monitors/monitors.json`, `plugin.json`, 
 command frontmatter — those are read when the session starts.
 
 ```bash
-npm test                # bridge routes, security checks, notification format
+npm install             # dev only — see "Dependencies" below; nothing here needs it to run
+npm test                # bridge routes, security checks, notification format, overlay anchoring
 npm run check           # syntax-check every .mjs / .js
 npm run reinstall       # refresh the cache copy (keeps the two in sync)
 npm run installed-path  # where the cache copy lives
@@ -319,6 +320,32 @@ npm run installed-path  # where the cache copy lives
 
 The tests start their own daemon on a free port with a private `TMPDIR`, so they never touch a
 bridge in use. A daemon left running from older code is replaced the next time `/preview` runs.
+
+### Dependencies
+
+**The plugin has zero runtime dependencies, and must keep it that way.** It runs from a plugin
+directory where nobody runs `npm install` — the marketplace copies files, not a package — so
+anything under `lib/`, `bridge/`, `scripts/`, `extension/` or `monitors/` that imported a package
+would break the plugin for everyone who installed it. `package.json` has no `dependencies` field
+and is not meant to grow one.
+
+There is exactly one `devDependency`: **jsdom**, so that `test/overlay.test.mjs` can execute the
+real `extension/overlay.js` inside a DOM. The overlay is one classic-script IIFE, deliberately not
+split into modules (three loaders, a global a hostile page can read, load-order failure modes), so
+it cannot be imported — the only honest test is to run what the browser runs. jsdom was picked over
+linkedom by trying both: linkedom needed eight hand-written shims before the file would start, the
+largest of them `getComputedStyle` and `CSS.escape`, which are precisely what the selector and
+region code is being tested on. A shim there is a lie the test would then be built on. jsdom starts
+the file with none.
+
+`node_modules/` is git-ignored, and nothing the plugin does at runtime reads it: `codeBuild()` in
+`lib/common.mjs` fingerprints only the `.mjs` files directly inside `bridge/` and `lib/`, and the
+bridge only ever serves files out of `extension/`.
+
+Without `node_modules`, `npm test` fails — only `test/overlay.test.mjs`, and with one line saying
+to run `npm install`. That is on purpose rather than a skip: those tests are the only cover the
+overlay's 2700 lines have, and a suite that quietly reports no failures on a checkout that ran none
+of them is the worse outcome. Every other test file still passes on a bare checkout.
 
 `extension/overlay.js` is the one canonical overlay: the extension packages it, and the bridge
 serves that same file. Load the unpacked extension from **this repo's** `extension/` directory, and

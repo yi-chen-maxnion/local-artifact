@@ -2753,4 +2753,28 @@
     const d = document.documentElement.dataset;
     if (d.ccSettings) try { applySettings(JSON.parse(d.ccSettings)); } catch {}
   }
+
+  /**
+   * Tests only - see test/overlay.test.mjs, which runs this exact file inside a DOM.
+   *
+   * Everything worth testing here is an anchor being described or found again, and every one of
+   * those failures is silent: the pin simply never comes back. They are also all closed over
+   * inside this IIFE, so a test can only reach them if the file hands them out.
+   *
+   * What it hands out is the rule: pure functions of what the caller passes in, each of which
+   * reads the page's own DOM and returns a selector, a string, a plain object, a Range, or the
+   * caller's own nodes back. Nothing here can send a comment, name the session, read the pins,
+   * reach the extension, or return a node inside the closed shadow root - because on a
+   * bridge-served page this script runs in the page world, where a hostile script can define
+   * `window.__ccTest` before the overlay loads and be handed whatever is on this list. So the
+   * list is exactly the set whose capability is "things the page could already do to itself",
+   * and `cfg`, `state`, `el`, `host`, `sr`, `pins` and `askExtension` are deliberately absent.
+   * Unused, it costs one `typeof`.
+   */
+  if (typeof window.__ccTest === 'function') {
+    window.__ccTest({
+      brief, cssSelector, describe, distinctClass, domPath,
+      elementsInRegion, findQuote, pageKey, selectorStep, unique,
+    });
+  }
 })();

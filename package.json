@@ -12,5 +12,8 @@
     "installed-path": "node -e \"const j=require(require('os').homedir()+'/.claude/plugins/installed_plugins.json');const e=Object.entries(j).flatMap(([k,v])=>Object.entries(v)).find(([k])=>k.startsWith('local-artifact'));console.log(e?e[1][0].installPath:'not installed')\"",
     "check": "for f in lib/*.mjs bridge/*.mjs scripts/*.mjs extension/*.js test/*.mjs; do node --check \"$f\" || exit 1; done && echo \"all files parse\"",
     "test": "node --test 'test/*.test.mjs'"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.0"
   }
 }
