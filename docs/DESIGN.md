@@ -25,6 +25,10 @@ are running.
 
 With two or more sessions live, an unclaimed origin goes to whichever ran `/preview` most
 recently, and an origin opened *explicitly* with `/preview` stays with the session that opened it.
+Where two sessions have both opened the same origin — two checkouts of one app on one dev server —
+the later `/preview` wins, for the same reason: the most recent setup gesture is the one the user
+just made. It reverts to the earlier session if the later one ends, since that session opened the
+origin explicitly too.
 When the session that owns the browser ends, it passes to the session that registered most
 recently. The corner button's tooltip and the compose panel both name the repo they are sending
 to, so this is visible rather than guessed, and `/comments` prints it.

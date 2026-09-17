@@ -198,6 +198,52 @@ test('previews, counters and seq survive a daemon restart', async () => {
 });
 
 /**
+ * Two sessions, one dev server. Both ran /preview on it, so both claims are explicit and the
+ * tie-break is the one the user can see: the most recent setup gesture owns the browser.
+ */
+describe('an origin two sessions have opened', () => {
+  const site = 'http://localhost:5199';
+  let bridge;
+  let keyA;
+  let keyB;
+
+  before(async () => {
+    bridge = await startBridge();
+    keyA = await register(bridge, `p${process.pid}`);
+    // A second session: the key only has to be a valid one and the pid only has to be alive.
+    keyB = await register(bridge, `p${process.pid}1`);
+  });
+  after(() => bridge.stop());
+
+  // Claims are ordered by the millisecond they were made, so two of them need different ones.
+  const claim = async (key) => {
+    await new Promise((r) => setTimeout(r, 2));
+    const res = await bridge.request('/preview', { json: { key, target: `${site}/` } });
+    assert.equal(res.status, 200);
+    return (await res.json()).previewId;
+  };
+
+  const resolved = async () => {
+    const res = await bridge.request(`/resolve?origin=${encodeURIComponent(site)}`, {
+      token: null, headers: { origin: 'chrome-extension://abc' },
+    });
+    assert.equal(res.status, 200);
+    return (await res.json()).previewId;
+  };
+
+  test('belongs to whichever session opened it last', async () => {
+    const a = await claim(keyA);
+    const b = await claim(keyB);
+    assert.notEqual(a, b); // one preview per (session, origin)
+    assert.equal(await resolved(), b);
+
+    // And it goes back when the first session opens it again - the same preview, re-claimed.
+    assert.equal(await claim(keyA), a);
+    assert.equal(await resolved(), a);
+  });
+});
+
+/**
  * A comment nobody receives has to say so. The grace period is what makes a monitor that is
  * merely reconnecting harmless, so it is turned off here to test the rule rather than the grace.
  */

@@ -42,7 +42,7 @@ const BUILD = codeBuild(ROOT);
 const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
 const sessions = new Map(); // key -> { key, pid, cwd, repo, at }
-// previewId -> { sessionKey, sessionPid, target, kind, root, entry, external, origin?, claimed? }
+// previewId -> { sessionKey, sessionPid, target, kind, root, entry, external, origin?, claimed?, claimedAt? }
 const previews = new Map();
 const clients = new Map(); // key -> Set<res>
 const store = new Store();
@@ -210,10 +210,16 @@ const originPreview = (sessionKey, origin) => previewFor(sessionKey, (pv) => pv.
 /** The session a page on this origin belongs to, or null if nothing is set up. */
 function ownerOf(origin) {
   // An origin that was explicitly opened with /preview stays with the session that opened it,
-  // whatever has been set up since.
+  // whatever has been set up since - and where several live sessions have opened it, with the one
+  // that opened it last. Insertion order would hand it to whoever got there first and never let go,
+  // so a second session running /preview on the same app would be told it owns a browser it does not.
+  let best = null;
   for (const pv of previews.values()) {
-    if (pv.origin === origin && pv.claimed && sessions.has(pv.sessionKey)) return pv.sessionKey;
+    if (pv.origin !== origin || !pv.claimed || !sessions.has(pv.sessionKey)) continue;
+    // Claimed by a daemon older than claimedAt: outranked by any claim that carries a time.
+    if (!best || (pv.claimedAt || 0) > (best.claimedAt || 0)) best = pv;
   }
+  if (best) return best.sessionKey;
   return sessions.has(primaryKey) ? primaryKey : null;
 }
 
@@ -325,6 +331,7 @@ const server = http.createServer(async (req, res) => {
         // Reused, not re-minted. The id is the namespace this origin's markers live in.
         found = originPreview(b.key, origin);
         found.pv.claimed = true; // an explicit open outranks "whoever set up last"
+        found.pv.claimedAt = Date.now(); // and a later explicit open outranks an earlier one
         found.pv.target = target;
       } else {
         const entry = path.resolve(target);
