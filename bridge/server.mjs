@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  HOST, PORT, ORIGIN, ROOT, SESSION_KEY, STATE_FILE, TOKEN_FILE,
+  HOST, PORT, ORIGIN, PING_MS, ROOT, SESSION_KEY, STATE_FILE, TOKEN_FILE,
   codeBuild, pidAlive, rateLimiter, readToken, shortId, writeFileAtomic,
 } from '../lib/common.mjs';
 import { Store, decodeShot } from './store.mjs';
@@ -625,7 +625,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (!clients.has(key)) clients.set(key, new Set());
       clients.get(key).add(res);
-      const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 25000);
+      const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, PING_MS);
       req.on('close', () => {
         clearInterval(ping);
         const set = clients.get(key);

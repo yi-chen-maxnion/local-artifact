@@ -7,7 +7,7 @@
  * costs one small process and a retry timer, nothing more.
  */
 import fs from 'node:fs';
-import { ORIGIN, bridge, readToken, resolveSession, scratchDir } from '../lib/common.mjs';
+import { ORIGIN, PING_MS, bridge, readToken, resolveSession, scratchDir } from '../lib/common.mjs';
 import { fmt } from '../lib/format.mjs';
 import { parseFrame } from '../lib/sse.mjs';
 
@@ -28,11 +28,11 @@ const FAST_ATTEMPTS = 12;
  * byte that is never coming - so comments are accepted by the bridge and silently never
  * delivered. Two things end that wait.
  *
- * The stream is never legitimately quiet for long: the server sends a ping every 25s, so
+ * The stream is never legitimately quiet for long: the server sends a ping every PING_MS, so
  * nothing for STALE_MS means the connection is gone, whatever it claims.
  */
 const TICK_MS = 5000;
-const STALE_MS = 70000; // two missed pings plus slack
+const STALE_MS = 2 * PING_MS + 20000; // two missed pings plus slack
 /**
  * And a tick that should take 5s taking far longer means the process was suspended - the
  * machine slept. The socket almost certainly did not survive it, so reconnect at once
