@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, connect, freePort, listen, register, startBridge } from './helpers.mjs';
+import { ROOT, connect, freePort, listen, register, seenExtension, startBridge } from './helpers.mjs';
 
 /**
  * The precondition ladder in scripts/open.mjs, rung by rung.
@@ -164,7 +164,30 @@ describe('scripts/open.mjs', () => {
       + 'here first, or its comments will go there');
   });
 
+  /**
+   * The last rung, and the only one this side cannot work out for itself: every precondition is
+   * met, the daemon answers, and no extension has ever reached it - so the file would arrive in a
+   * browser with no button on it and look exactly like one that worked.
+   *
+   * It runs before the success below, which is what seeds the sighting this daemon then keeps.
+   */
+  test('with no extension ever seen, it refuses and names the install', async () => {
+    const { code, err } = await run([report], {
+      setup: async (key, pid) => {
+        await register(bridge, key, pid);
+        const monitor = await listen(bridge, key);
+        await connect(bridge, key);
+        return () => monitor.close();
+      },
+    });
+    assert.equal(code, 3);
+    assert.match(first(err), /^open: the extension has never reached the bridge - install it: /);
+    assert.match(first(err), /chrome:\/\/extensions -> Developer mode -> Load unpacked -> \S+\/extension$/);
+  });
+
   test('connected, it opens the file and says where its comments go', async () => {
+    // What a browser with the extension in it does on its own, on the first page it loads.
+    await seenExtension(bridge);
     const { code, out, err, key } = await run([report], {
       setup: async (k, pid) => {
         await register(bridge, k, pid);

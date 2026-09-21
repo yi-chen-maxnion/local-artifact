@@ -53,6 +53,31 @@ async function main() {
   };
 
   /**
+   * What the bridge could not be asked, in the words the Slack row uses for the same failure.
+   * On the code, never on the sentence: the worker's English is for a person to read and gets
+   * reworded, and matching it is how this menu would quietly fall back to "cannot get status".
+   * A 404 is the other shape of the same problem - a daemon from older code, which /connect
+   * replaces on its next run - so both point at the same thing to do.
+   */
+  const unreachable = (s) => (s?.code === 'bridge_unreachable' || s?.code === 'bridge_timeout' || s?.status === 404
+    ? 'Bridge 沒有在執行或版本過舊，請執行 /connect'
+    : '無法取得狀態');
+
+  /**
+   * Which session a comment from this browser would reach. The button on the page looks exactly
+   * the same whether one is connected or not, and this is the only place that can say which it
+   * is without a comment being sent to find out.
+   */
+  async function paintSession() {
+    const s = await ask('status');
+    const el = $('session-note');
+    if (!s || s.error) { el.textContent = unreachable(s); return; }
+    el.textContent = s.connected
+      ? `-> ${s.repo || '已連線的 session'}`
+      : '沒有連線的 Claude session，請執行 /connect';
+  }
+
+  /**
    * Four states, each with the one thing to do about it: no bridge, no app configured, connected,
    * not connected. The button is hidden where there is nothing the menu can do.
    */
@@ -62,14 +87,7 @@ async function main() {
     btn.hidden = true;
     btn.disabled = false;
     btn.className = 'btn';
-    // On the code, never on the sentence: the worker's English is for a person to read and gets
-    // reworded, and matching it is how this menu would quietly fall back to "cannot get status".
-    // A 404 is the other shape of the same problem - a daemon from older code, which /connect
-    // replaces on its next run - so both point at the same thing to do.
-    if (!s || s.error) {
-      const gone = s?.code === 'bridge_unreachable' || s?.code === 'bridge_timeout' || s?.status === 404;
-      return note(gone ? 'Bridge 沒有在執行或版本過舊，請執行 /connect' : '無法取得狀態');
-    }
+    if (!s || s.error) return note(unreachable(s));
     if (!s.configured) return note('尚未設定 Slack App，見 slack-app.json');
     if (s.connected) {
       note(`${s.user}${s.team ? `@${s.team}` : ''}`);
@@ -96,6 +114,7 @@ async function main() {
     };
   }
 
+  paintSession();
   paintSlack();
 }
 

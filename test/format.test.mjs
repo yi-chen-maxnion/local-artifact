@@ -1,6 +1,6 @@
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fmt, slackMessage } from '../lib/format.mjs';
+import { extensionLine, fmt, slackMessage } from '../lib/format.mjs';
 
 const base = {
   seq: 1, n: 3, previewId: 'abcdef123456', repo: 'web', comment: 'make it blue',
@@ -179,4 +179,46 @@ test('the session notification is plain text, so its backticks stay whole', () =
   const out = fmt({ ...base, anchor: { kind: 'selection', selectedText: '```js\nx\n```', selector: 'pre' } });
   assert.match(out, /\| ```js/);
   assert.ok(!out.includes('\u200b'));
+});
+
+/**
+ * The one sentence every command says about the extension. It is the difference between a setup
+ * that works and one that looks identical and does nothing, so each of the three states names the
+ * thing to do about it - and the install path is the repo's own, since that is what the user has
+ * to point "Load unpacked" at.
+ */
+describe('extensionLine', () => {
+  const ROOT = '/Users/someone/repos/local-artifact-plugin';
+  const now = Date.UTC(2026, 8, 21, 12, 0, 0);
+
+  test('never seen: the whole of the install, in one line', () => {
+    assert.equal(
+      extensionLine(null, ROOT, now),
+      'extension  NOT SEEN - install it: chrome://extensions -> Developer mode -> Load unpacked -> '
+      + `${ROOT}/extension`,
+    );
+    // A record with no timestamp on it is the same thing as no record.
+    assert.equal(extensionLine({ id: 'x' }, ROOT, now), extensionLine(null, ROOT, now));
+  });
+
+  test('seen recently: how long ago, and nothing to do', () => {
+    assert.equal(extensionLine({ seenAt: now - 4000 }, ROOT, now), 'extension  seen 4s ago');
+    assert.equal(extensionLine({ seenAt: now - 90 * 1000 }, ROOT, now), 'extension  seen 2m ago');
+    // The boundary itself is still "recently"; a second past it is not.
+    assert.match(extensionLine({ seenAt: now - (10 * 60 * 1000 - 1) }, ROOT, now), /^extension {2}seen /);
+    assert.match(extensionLine({ seenAt: now - 10 * 60 * 1000 }, ROOT, now), /^extension {2}last seen /);
+  });
+
+  test('seen long ago: it was there once, so say what may have happened to it', () => {
+    assert.equal(
+      extensionLine({ seenAt: now - 3 * 24 * 3600 * 1000 }, ROOT, now),
+      'extension  last seen 3d ago - open a page in Chrome; if no button appears, '
+      + 'reload it at chrome://extensions',
+    );
+    assert.match(extensionLine({ seenAt: now - 2 * 3600 * 1000 }, ROOT, now), /^extension {2}last seen 2h ago - /);
+  });
+
+  test('a clock that has gone backwards reads as now rather than as a negative age', () => {
+    assert.equal(extensionLine({ seenAt: now + 5000 }, ROOT, now), 'extension  seen 0s ago');
+  });
 });

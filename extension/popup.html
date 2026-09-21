@@ -56,7 +56,12 @@
     <span class="label">非留言模式也顯示標記<small>淡化的標記會留在頁面上</small></span>
     <input type="checkbox" class="switch" id="pins">
   </label>
-  <div class="row sep" id="slack-row">
+  <!-- Where a comment from this browser would go. Above Slack because it is the thing the button
+       on the page does by default; the row below is the other place it can be sent. -->
+  <div class="row sep" id="session-row">
+    <span class="label" id="session-note"></span>
+  </div>
+  <div class="row" id="slack-row">
     <span class="label">Slack<small id="slack-note" class="who" hidden></small></span>
     <button class="btn" id="slack-btn" hidden></button>
   </div>

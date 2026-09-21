@@ -18,6 +18,19 @@ Then relay the result. The last line reports whether the monitor attached:
   trigger in `monitors/monitors.json` is the **plugin-namespaced** skill name
   (`on-skill-invoke:local-artifact:connect`), since a bare name matches nothing silently.
 
+The `extension` line says whether anything will actually put the comment button on a page. Relay
+it whenever it is not `seen`:
+
+- `extension  NOT SEEN` — no extension has ever reached the bridge, so no page will carry the
+  button and nothing can be sent. The command exits `3` for this even though the session is
+  connected. Tell the user to install it, and give them the path the line names:
+  `chrome://extensions` → Developer mode → Load unpacked → the `extension/` directory it prints.
+- `extension  last seen … ago` — one reached the bridge once but not recently. Tell them to open
+  a page in Chrome, and to reload the extension at `chrome://extensions` if no button appears.
+
+`browser this session (taken from <repo>)` means another live session was connected and this one
+has just taken the browser: say so, since the comments that were going there now come here.
+
 If the script fails instead, relay its `connect:` line. Two failures have a known fix:
 
 - `could not find the claude process` — comments are routed by the id of the `claude` process

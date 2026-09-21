@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { ORIGIN, bridge, ensureDaemon, health, openInBrowser, resolveSession, scratchDir, sleep } from '../lib/common.mjs';
+import { ORIGIN, ROOT, bridge, ensureDaemon, health, openInBrowser, resolveSession, scratchDir, sleep } from '../lib/common.mjs';
+import { extensionLine } from '../lib/format.mjs';
 
 const cmd = process.argv[2] || 'status';
 const session = resolveSession();
@@ -97,6 +98,9 @@ if (!h.sessions) {
   console.log(`browser    ${h.primary
     ? (h.primary === session.key ? 'this session' : `${primary?.repo || h.primary} - run /connect here to take it over`)
     : 'not connected - run /connect'}`);
+  // Directly under the browser line, because it is the other half of the same question: one says
+  // which session a comment would reach, this says whether anything can send one.
+  console.log(extensionLine(h.extension, ROOT));
   // Ids, not ownership: a record is the namespace a page's pins and comment numbers live in,
   // and it belongs to no session - whoever holds the browser above receives their comments.
   const origins = h.previews.filter((p) => p.origin);

@@ -110,7 +110,7 @@ does. The routes that register sessions, open files and stream comments therefor
 once the port is its own, and `connect`, `ctl` and the monitor send it. A web page cannot read the
 file. Without the token `/health` says only that the bridge is up. Every `POST` must also be
 `application/json`, which a cross-origin page cannot send without a preflight this server never
-grants outside `/comment`.
+grants anywhere.
 
 This was not hypothetical. Session keys become directory names, and an ended session's directory
 is removed recursively — so registering a session named `../../../..` with a pid that does not
@@ -839,16 +839,23 @@ button still there to send it somewhere else.
 Two failures look identical from the page — the Send button spins and the panel says the bridge
 is not answering — and they have different causes.
 
-**Cross-origin POSTs (the bookmarklet).** A page the bridge serves is same-origin and needs no
-ceremony, and the extension posts from its service worker. A bookmarklet on a dev server on
-`localhost:5173` is a *different origin* from the bridge on `127.0.0.1:4517`, so the browser sends
-an `OPTIONS` preflight first and refuses to hand the page the response without an
-`access-control-allow-origin` header. The bridge once answered neither, so every such comment
-failed with an unexplained `Failed to fetch` — while the same request from `curl`, which does not
-preflight, returned `200`. That is why it looked like a bridge outage.
+**No CORS anywhere, including `/comment`.** `/comment` once granted a preflight, for the one
+caller that needed one: a bookmarklet on `localhost:5173` posting cross-origin to the bridge on
+`127.0.0.1:4517`, which the browser will not hand a response to without an
+`access-control-allow-origin` header. That caller is gone. A comment now comes from the
+extension's service worker, whose fetch is covered by the manifest's `host_permissions` and is
+not subject to CORS at all, and `/comment` refuses every page whatever its origin — so the grant
+bought nothing and the `OPTIONS` handler went with it. A page attempting the POST now stops at
+its own preflight, which `404`s like any other method this server does not handle.
 
-CORS is scoped to `/comment` alone. The allow-origin header goes on the `403` too, so the page can
-read *why* it was refused instead of showing the browser's opaque network error.
+**No extension.** The other silent failure, and the one the daemon can see: every page carries
+its button because the extension puts it there, so with no extension installed a session can
+connect, open a file and receive nothing, with no sign on screen of what is missing. Every
+request the worker makes carries `x-cc-ext: <chrome.runtime.id>`, and the daemon records the
+sighting — but only beside a `chrome-extension://` Origin, since a page can send any header it
+likes through a preflight, and only as a timestamp, since nothing is ever granted on the strength
+of it. `/connect`, `/comments` and `open.mjs` print the one line `lib/format.mjs` builds from it;
+`/connect` and `open.mjs` exit `3` when nothing has ever been seen.
 
 **A stream that died without saying so.** Sleep the machine, drop the Wi-Fi or flip a VPN and the
 monitor's SSE socket is left half-open: nothing errors, nothing closes, and `reader.read()` waits

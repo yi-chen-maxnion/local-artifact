@@ -49,11 +49,12 @@ async function resolveOrigin(origin) {
   const hit = resolved.get(origin);
   const ttl = hit?.value ? RESOLVE_TTL : RESOLVE_MISS_TTL;
   if (hit && Date.now() - hit.at < ttl) return hit.value;
-  let value = null;
-  try {
-    const r = await fetch(`${BRIDGE}/resolve?origin=${encodeURIComponent(origin)}`);
-    if (r.ok) value = await r.json();
-  } catch {}
+  // Through `call` like everything else, so this worker has exactly one place that decides what a
+  // request to the bridge carries - and so the busiest route of all is the one that keeps the
+  // daemon's record of this extension fresh. A failure comes back as `{ error }`, which is a miss
+  // here and cached as one.
+  const answer = await call(`/resolve?origin=${encodeURIComponent(origin)}`);
+  const value = answer?.error ? null : answer;
   resolved.set(origin, { at: Date.now(), value });
   return value;
 }
@@ -162,8 +163,8 @@ async function paintBadge(tabId, origin) {
         tabId,
         title: off
           ? `Comments off for ${origin}`
-          : b || origin === BRIDGE
-            ? `Commenting into ${b?.repo || 'the set-up session'}`
+          : b
+            ? `Commenting into ${b.repo || 'the set-up session'}`
             : 'No Claude session is set up - run /connect in one',
       }),
     ]);
@@ -181,6 +182,11 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 /**
  * Every call to the bridge, from the one place. POST when there is a body, GET when there is not.
  *
+ * Each one carries `x-cc-ext`, this extension's own id, which is how the daemon knows an extension
+ * exists at all: `/connect` and `/comments` say so, and `open.mjs` refuses to put a file in front
+ * of a browser that has never had one. It is a sighting and nothing more - the bridge grants
+ * nothing on the strength of this header - so there is no reason to send it selectively.
+ *
  * This is the route that makes a deployed build work. A page on https://example.com fetching
  * http://127.0.0.1 is a local-network request, which Chrome 142 and later gate behind a
  * permission prompt; from here it is an ordinary extension fetch covered by host permissions.
@@ -189,12 +195,15 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
  * words for it: one of these callers used to replace them with a status, which turned "that
  * channel is archived" into "bridge 502".
  */
-async function call(route, { body, timeout = 25000 } = {}) {
+async function call(route, { body, method, timeout = 25000 } = {}) {
   let r;
   try {
     r = await fetch(`${BRIDGE}${route}`, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      method: method || (body === undefined ? 'GET' : 'POST'),
+      headers: {
+        'x-cc-ext': chrome.runtime.id,
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(timeout),
     });
@@ -214,6 +223,17 @@ async function call(route, { body, timeout = 25000 } = {}) {
   // is how a daemon from older code is told apart: it answers a route it does not have with 404.
   return { error: j.error || `bridge ${r.status}`, code: j.code || 'bridge_error', status: r.status };
 }
+
+/**
+ * Hello, from a Chrome that has just started or an extension that has just been loaded.
+ *
+ * Nothing needs the answer; what it is for is the header the request carries. Otherwise a person
+ * who installs the extension and runs /connect before visiting anything is told the extension is
+ * NOT SEEN and sent to install the one they have just installed. One request, twice in a session.
+ */
+const sayHello = () => call('/health', { timeout: 4000 });
+chrome.runtime.onStartup.addListener(sayHello);
+chrome.runtime.onInstalled.addListener(sayHello);
 
 async function sendComment(payload) {
   if (!payload.previewId) return { error: 'this page is not bound to a session - reload it' };
@@ -248,6 +268,13 @@ async function slackStatus() {
   slackAt = Date.now();
   return slackWas;
 }
+
+/**
+ * Which session the pages in this browser report to, for the toolbar menu. Asked every time the
+ * menu opens rather than cached: it is one loopback request, and the answer changes whenever
+ * anybody runs /connect anywhere.
+ */
+const status = () => call('/status', { timeout: 4000 });
 
 /** Starting and ending a Slack connection from the toolbar menu. */
 async function slackLogin() {
@@ -302,11 +329,11 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
     return true;
   }
 
-  const slack = {
-    slackDestinations, slackShare, slackStatus, slackLogin, slackLogout,
+  const ask = {
+    slackDestinations, slackShare, slackStatus, slackLogin, slackLogout, status,
   }[msg?.type];
-  if (slack) {
-    slack(msg.payload)
+  if (ask) {
+    ask(msg.payload)
       .then(respond)
       .catch((e) => respond({ error: String(e?.message || e) }));
     return true;

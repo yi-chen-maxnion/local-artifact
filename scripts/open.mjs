@@ -13,7 +13,8 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { bridge, health, openInBrowser, resolveSession } from '../lib/common.mjs';
+import { ROOT, bridge, health, openInBrowser, resolveSession } from '../lib/common.mjs';
+import { installHint } from '../lib/format.mjs';
 
 /**
  * Every refusal reads the same way: one `open:` line, on stderr, with the reason in it. The exit
@@ -72,8 +73,13 @@ if (h.primary !== session.key) {
     + 'first, or its comments will go there', 3);
 }
 
-// The extension-seen check belongs here, once the daemon reports it (step 8): a file opened into
-// a browser with no extension in it carries no button at all, and has to say so.
+// The last rung, and the one that cannot be inferred from this side: no extension has ever
+// reached the daemon, so whatever this opens arrives in a browser with no button on it. Every
+// other precondition would be met and the file would look exactly as it should.
+if (!h.extension) {
+  refuse(`the extension has never reached the bridge - ${installHint(ROOT)}`, 3,
+    'Then open any page in Chrome once, so the bridge sees it, and try this again.');
+}
 
 try {
   const { url } = await bridge('/open', { body: { key: session.key, target: file } });

@@ -122,6 +122,48 @@ const isExtension = (origin) => /^chrome-extension:\/\//i.test(origin || '');
 const hasToken = (req) => req.headers['x-cc-token'] === TOKEN;
 
 /**
+ * A Chrome extension id: thirty-two letters from the first half of the alphabet. Anything else
+ * carrying this header is not one, and is ignored rather than recorded.
+ */
+const EXTENSION_ID = /^[a-p]{32}$/;
+/** When an extension last reached this daemon, and which one - see `noteExtension`. */
+let extensionSeenAt = 0;
+let extensionId = '';
+let extensionSavedAt = 0;
+/** How stale the saved sighting may be before another request writes it out. See `noteExtension`. */
+const EXTENSION_SAVE_MS = 60 * 1000;
+
+/**
+ * The extension saying it is there, on every request it makes.
+ *
+ * Without the extension nothing puts the comment button on a page, so a session can be connected,
+ * a file can be opened, and nothing whatever will come back - with nothing on screen to say why.
+ * This is the one signal that tells a command the difference, and every place that reports status
+ * prints it.
+ *
+ * The header alone grants nothing, and must never be made to: a page CAN send a custom header,
+ * by accepting a CORS preflight, so anything at all can claim to be an extension here. What is
+ * not forgeable is the Origin, which the browser sets - so this only records a sighting, only
+ * when the request also comes from a chrome-extension:// origin, and no route consults it to
+ * decide whether a caller is allowed anything.
+ */
+function noteExtension(req) {
+  const id = req.headers['x-cc-ext'];
+  if (typeof id !== 'string' || !EXTENSION_ID.test(id) || !isExtension(req.headers.origin)) return;
+  extensionSeenAt = Date.now();
+  const fresh = id !== extensionId;
+  extensionId = id;
+  // Lazily persisted. /resolve runs on every page load, and a state write per page load would be
+  // the most frequent disk write this daemon makes - for a value nothing reads more than once a
+  // command. Written when the id changes (a reinstall mints a new one), and otherwise at most
+  // once a minute, which is far finer than the ten-minute window the line is worded against.
+  if (fresh || extensionSeenAt - extensionSavedAt > EXTENSION_SAVE_MS) {
+    extensionSavedAt = extensionSeenAt;
+    saveState();
+  }
+}
+
+/**
  * Routes a web page may not call at all, whatever page it is.
  *
  * What they hand back is the user's, not a page's: which session owns this browser, and where
@@ -138,7 +180,7 @@ function extensionOnly(req) {
 
 function readBody(req) {
   // A JSON content type is what forces a cross-origin page through a preflight, which this
-  // server never grants outside /comment. Accepting `text/plain` would let any page post here blind.
+  // server never grants anywhere. Accepting `text/plain` would let any page post here blind.
   if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
     return Promise.reject(Object.assign(new Error('content-type must be application/json'), { status: 415 }));
   }
@@ -161,7 +203,8 @@ function readBody(req) {
 function saveState() {
   try {
     writeFileAtomic(STATE_FILE, JSON.stringify({
-      seq, primaryKey, previews: [...previews.entries()], counters: store.counters(),
+      seq, primaryKey, extensionSeenAt, extensionId,
+      previews: [...previews.entries()], counters: store.counters(),
     }));
   } catch {}
 }
@@ -181,6 +224,10 @@ function loadState() {
   try { raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return; }
   seq = Number(raw.seq) || 0;
   primaryKey = raw.primaryKey || null;
+  // The sighting outlives the daemon: an extension the user installed yesterday has not stopped
+  // existing because this process was restarted, and a restart must not report it as NOT SEEN.
+  extensionSeenAt = Number(raw.extensionSeenAt) || 0;
+  extensionId = EXTENSION_ID.test(String(raw.extensionId || '')) ? raw.extensionId : '';
   const kept = [];
   // Rebuilt field by field rather than taken as it was written: a state file from before records
   // lost their session carries `sessionKey`, `sessionPid`, `claimed` and `claimedAt`, and reading
@@ -331,6 +378,9 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (!HOSTS.has(req.headers.host)) return json(res, 421, { error: 'unexpected host' });
+    // Before the routes, because it is about the caller rather than about the route: any request
+    // the extension makes is a sighting, including the ones that are then refused.
+    noteExtension(req);
     if (CONTROL.has(p) && !hasToken(req)) return json(res, 401, { error: 'control token required' });
 
     if (p === '/health') {
@@ -340,6 +390,8 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         ok: true, pid: process.pid, origin: ORIGIN, instance: INSTANCE, root: ROOT, build: BUILD,
         primary: primaryKey, slack: slack.status(),
+        // Null for never, which is what every command turns into "install the extension".
+        extension: extensionSeenAt ? { seenAt: extensionSeenAt, id: extensionId } : null,
         sessions: [...sessions.values()].map((s) => ({ ...s, clients: clients.get(s.key)?.size || 0 })),
         previews: [...previews.entries()].map(([id, v]) => ({
           id, target: v.target, kind: v.kind, origin: v.origin || undefined,
@@ -374,11 +426,24 @@ const server = http.createServer(async (req, res) => {
     if (p === '/connect' && req.method === 'POST') {
       const b = await readBody(req);
       if (!sessions.has(b.key)) return json(res, 409, { error: 'session not registered' });
+      /**
+       * Who is losing the browser. Read before the pruning below so a session that has merely
+       * ended is not reported as having had it taken, and only when it is somebody else: this
+       * is a handover the other session will never be told about, so the one doing the taking
+       * says it out loud rather than letting comments move without a word.
+       */
+      const before = primaryKey;
+      pruneSessions();
+      const prior = before !== b.key && sessions.has(before) ? sessions.get(before) : null;
       // The whole of the setup gesture: from now on this session owns the browser, and every
       // comment from every page goes to it.
       primaryKey = b.key;
       saveState();
-      return json(res, 200, { ok: true, primary: primaryKey });
+      return json(res, 200, {
+        ok: true,
+        primary: primaryKey,
+        previous: prior ? { key: prior.key, repo: prior.repo } : null,
+      });
     }
 
     /**
@@ -456,6 +521,22 @@ const server = http.createServer(async (req, res) => {
         repo: sessions.get(key).repo,
         slack: slackFor(),
       });
+    }
+
+    /**
+     * What the toolbar menu says above Slack: is any session connected to this browser, and which
+     * repo is it. A page carrying the comment button and no session behind it looks exactly like
+     * one that works, and the menu is the only place that can say so without a comment being sent.
+     *
+     * The extension's alone, like /resolve, and for the same reason: which repo a person has open
+     * is theirs, not a web page's. Nothing here is a routing token, so it is deliberately less
+     * than /resolve hands back.
+     */
+    if (p === '/status') {
+      if (!extensionOnly(req)) return json(res, 403, { error: 'not available to a web page' });
+      pruneSessions();
+      const key = connectedSession();
+      return json(res, 200, { connected: Boolean(key), repo: key ? sessions.get(key).repo : '' });
     }
 
     /**
@@ -574,29 +655,14 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, contentType(asset), buf);
     }
 
-    if (p === '/comment') {
-      /**
-       * CORS, scoped to /comment alone - the one route a page on another origin calls: a
-       * bookmarklet on a dev server. A page served by this bridge is same-origin and the
-       * extension is exempt, so neither needs any of this.
-       *
-       * Deliberately NOT applied to every route. The header goes on error responses too, so the
-       * page can read a 403 and say what happened instead of the browser's opaque network error.
-       */
-      const origin = req.headers.origin;
-      if (origin) {
-        res.setHeader('access-control-allow-origin', origin);
-        res.setHeader('vary', 'origin');
-      }
-      if (req.method === 'OPTIONS') {
-        return send(res, 204, 'text/plain; charset=utf-8', '', {
-          'access-control-allow-methods': 'POST, OPTIONS',
-          'access-control-allow-headers': 'content-type',
-          'access-control-max-age': '600',
-        });
-      }
-    }
-
+    /**
+     * No CORS anywhere on this server, /comment included. It used to grant a preflight here for
+     * the one caller that needed one - a bookmarklet on a dev server posting cross-origin - and
+     * that caller is gone: a comment comes from the extension's service worker, whose fetch is
+     * covered by the manifest's host_permissions and is not subject to CORS at all. What a page
+     * would get from the block that stood here is a preflight it can no longer pass, which is
+     * the right answer to a route that refuses every page anyway.
+     */
     if (p === '/comment' && req.method === 'POST') {
       const b = await readBody(req);
       const pv = previews.get(b.previewId);

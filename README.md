@@ -57,7 +57,7 @@ own pages, but nothing can comment on them: what stops is everything the extensi
 | command | what it does |
 |---|---|
 | `/connect` | set this session up as the one the browser reports to; takes no argument, opens nothing, starts the bridge if needed |
-| `/comments` | bridge status, which session owns the browser, the origins and files it has ids for, screenshot count |
+| `/comments` | bridge status, which session owns the browser, whether the extension has reached it, the origins and files it has ids for, screenshot count |
 | `/slack [login\|logout\|status]` | connect Slack, so a comment can be posted to a channel or a person instead |
 
 **The session owns the browser, not a URL.** That is why `/connect` takes no target: run it once
@@ -235,9 +235,13 @@ command that hands it a file: the extension's row is the one you get.
   drag over them becomes a region; leave comment mode to scroll them.
 - **No button on a page.** The origin may be turned off (the toolbar badge says `off`; the toolbar menu turns it back on), or no
   session has run `/connect` yet.
+- **`/connect` says `extension  NOT SEEN`.** No extension has ever reached the bridge, so nothing
+  puts the button on a page. The line names the install; it is the same one under "The Chrome
+  extension" above. `last seen … ago` instead means one reached it once: open a page in Chrome,
+  and if no button appears, reload the extension at `chrome://extensions`.
 
-`/comments` shows the bridge, the session that owns the browser, and whether this session's
-monitor is connected.
+`/comments` shows the bridge, the session that owns the browser, whether the extension has been
+seen, and whether this session's monitor is connected.
 
 ## Layout
 

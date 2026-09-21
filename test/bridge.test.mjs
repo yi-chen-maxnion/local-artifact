@@ -4,7 +4,10 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fmt } from '../lib/format.mjs';
-import { ROOT, comment, connect, freePort, listen, open, originId, register, resolveOrigin, startBridge } from './helpers.mjs';
+import {
+  EXTENSION_ID, ROOT, comment, connect, freePort, listen, open, originId, register, resolveOrigin,
+  seenExtension, startBridge,
+} from './helpers.mjs';
 
 describe('bridge', () => {
   let bridge;
@@ -89,8 +92,36 @@ describe('bridge', () => {
       assert.equal(res.status, 409);
     });
 
-    test('names the session it made primary', async () => {
-      assert.deepEqual(await connect(bridge, key), { ok: true, primary: key });
+    test('names the session it made primary, and says nothing was taken', async () => {
+      assert.deepEqual(await connect(bridge, key), { ok: true, primary: key, previous: null });
+    });
+
+    /**
+     * Taking the browser from somebody else. The session losing it is never told - its comments
+     * simply stop arriving - so the answer names who was holding it, and the command prints that
+     * as the one warning either side gets.
+     */
+    test('names the live session it took the browser from', async () => {
+      const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+      try {
+        await bridge.request('/register', {
+          json: { key: `p${other.pid}`, pid: other.pid, cwd: '/tmp/elsewhere', repo: 'elsewhere' },
+        });
+        await connect(bridge, `p${other.pid}`);
+        assert.deepEqual(await connect(bridge, key), {
+          ok: true, primary: key, previous: { key: `p${other.pid}`, repo: 'elsewhere' },
+        });
+        // Connecting again takes it from nobody: it was already this session's.
+        assert.equal((await connect(bridge, key)).previous, null);
+
+        // A session that has merely ended did not have it taken, and must not be named as though
+        // somebody were about to notice.
+        await connect(bridge, `p${other.pid}`);
+        await new Promise((resolve) => { other.once('exit', resolve); other.kill('SIGKILL'); });
+        assert.equal((await connect(bridge, key)).previous, null);
+      } finally {
+        other.kill('SIGKILL');
+      }
     });
   });
 
@@ -226,6 +257,25 @@ describe('bridge', () => {
     });
 
     /**
+     * The CORS grant that used to live here is gone with the caller it was written for: a
+     * bookmarklet posting from a dev server's own origin. The only caller left is the extension's
+     * service worker, whose fetch is covered by host_permissions and never preflights - so a
+     * preflight now gets the same answer as any other method nothing handles, and a page trying
+     * to post a comment stops at the browser rather than at the 403.
+     */
+    test('answers a preflight like any unknown route, and grants no origin', async () => {
+      const res = await bridge.request('/comment', {
+        token: null,
+        method: 'OPTIONS',
+        headers: { origin: 'http://localhost:5173', 'access-control-request-method': 'POST' },
+      });
+      assert.equal(res.status, 404);
+      assert.equal((await res.json()).error, 'no route');
+      assert.equal(res.headers.get('access-control-allow-origin'), null);
+      assert.equal(res.headers.get('access-control-allow-headers'), null);
+    });
+
+    /**
      * A comment left on a page the bridge served names a loopback URL with an id in it, which
      * says nothing about what to go and edit. The daemon holds the one thing that does - the path
      * the file was opened from - so it puts it in the notification rather than leaving a session
@@ -288,6 +338,95 @@ describe('bridge', () => {
       assert.ok(j.previewId, JSON.stringify(j));
       assert.equal(j.repo, 'repo');
     });
+  });
+
+  /**
+   * What the toolbar menu shows: a page carrying the button and no session behind it looks
+   * exactly like one that works, and this is the only way to tell without sending a comment.
+   * Deliberately less than /resolve - no id, nothing routable - and refused to a web page all
+   * the same, because which repo somebody has open is theirs.
+   */
+  describe('/status', () => {
+    test('says which session the browser reports to', async () => {
+      await connect(bridge, key);
+      const res = await bridge.request('/status', { token: null, headers: { origin: 'chrome-extension://abc' } });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { connected: true, repo: 'repo' });
+    });
+
+    test('refuses web contexts, like every other route that answers about the user', async () => {
+      const page = { token: null, headers: { origin: 'http://localhost:5173' } };
+      assert.equal((await bridge.request('/status', page)).status, 403);
+      const embedded = { token: null, headers: { 'sec-fetch-site': 'cross-site' } };
+      assert.equal((await bridge.request('/status', embedded)).status, 403);
+    });
+  });
+});
+
+/**
+ * Whether an extension exists at all.
+ *
+ * Nothing else here can answer it. A session registers, connects, opens a file, and every one of
+ * those succeeds in a browser with no extension in it - where no page carries a button and no
+ * comment is ever sent. The signal is a header the service worker puts on every request it makes;
+ * what makes it worth anything is the Origin beside it, since a page can send a header of its own
+ * choosing through a preflight and must never be able to claim this.
+ */
+describe('the extension-seen signal', () => {
+  let bridge;
+  const ID = EXTENSION_ID;
+  const site = 'http://localhost:7700';
+  const resolve = (headers) => bridge.request(`/resolve?origin=${encodeURIComponent(site)}`, {
+    token: null, headers,
+  });
+  const seen = async () => (await (await bridge.request('/health')).json()).extension;
+
+  before(async () => { bridge = await startBridge(); });
+  after(() => bridge.stop());
+
+  test('is absent until something claims it, which is what NOT SEEN means', async () => {
+    assert.equal(await seen(), null);
+  });
+
+  test('a request from the extension without the header moves nothing', async () => {
+    assert.equal((await resolve({ origin: 'chrome-extension://abc' })).status, 404); // nothing connected
+    assert.equal(await seen(), null);
+  });
+
+  // The header alone is not evidence and never may be: a page can put any header it likes on a
+  // fetch it is willing to have preflighted.
+  test('the header from a web page is not the extension', async () => {
+    await resolve({ origin: site, 'x-cc-ext': ID });
+    assert.equal(await seen(), null);
+  });
+
+  test('a value that is not a Chrome extension id is ignored', async () => {
+    for (const bad of ['', 'zzz', ID.toUpperCase(), `${ID}q`, ID.slice(1)]) {
+      await resolve({ origin: `chrome-extension://${ID}`, 'x-cc-ext': bad });
+      assert.equal(await seen(), null, JSON.stringify(bad));
+    }
+  });
+
+  test('the header beside a chrome-extension origin records it, with its id', async () => {
+    const before = Date.now();
+    await resolve({ origin: `chrome-extension://${ID}`, 'x-cc-ext': ID });
+    const now = await seen();
+    assert.equal(now.id, ID);
+    assert.ok(now.seenAt >= before, `${now.seenAt} < ${before}`);
+  });
+
+  /**
+   * And it outlives the daemon. An extension installed yesterday has not stopped existing because
+   * this process restarted, and a restart that reported NOT SEEN would send the user to install
+   * what they already have. The first sighting of an id is what writes it out - see the save
+   * policy in noteExtension - so one request is enough to have persisted it.
+   */
+  test('it survives a restart, because the id was new when it arrived', async () => {
+    const was = await seen();
+    assert.ok(was?.seenAt, 'nothing was recorded to survive anything');
+    await bridge.stop();
+    bridge = await startBridge({ tmp: bridge.dir, port: bridge.port });
+    assert.deepEqual(await seen(), was);
   });
 });
 
@@ -415,18 +554,51 @@ describe('scripts/connect.mjs', () => {
     });
   });
 
-  test('claims the browser for its session and says the monitor is listening', async () => {
+  /** A `claude` process for the script to find itself under - see the note above. */
+  const named = () => {
     const dir = fs.mkdtempSync(path.join(bridge.dir, 'session-'));
-    const named = path.join(dir, 'claude');
-    fs.symlinkSync(process.execPath, named);
+    const exe = path.join(dir, 'claude');
+    fs.symlinkSync(process.execPath, exe);
+    return exe;
+  };
 
-    const { code, out, err, pid } = await run(named, [SCRIPT], bridge.port, { monitor: true });
-    assert.equal(err, '');
-    assert.equal(code, 0);
+  /**
+   * With no extension, everything this command does still works - and none of it is worth
+   * anything, because nothing will put a button on a page. So it says so twice: on stdout among
+   * the rest of the report, and on stderr as the failure it is, with an exit code the caller
+   * cannot read past. The setup itself is done, which is why the line comes after the report
+   * rather than in place of it.
+   *
+   * This runs before the test below, which is what leaves this daemon with no sighting on it.
+   */
+  test('with no extension ever seen, it finishes the setup and then fails', async () => {
+    const { code, out, err, pid } = await run(named(), [SCRIPT], bridge.port, { monitor: true });
+    assert.equal(code, 3);
     assert.match(out, new RegExp(`^connect {2}session p${pid} \\(`));
     assert.match(out, /\n {2}monitor listening\n$/); // the line the slash command reads back
+    const install = /^extension {2}NOT SEEN - install it: chrome:\/\/extensions -> Developer mode -> Load unpacked -> \S+\/extension$/m;
+    assert.match(out, install);
+    const said = err.trim().split('\n');
+    // The port the test suite runs on is not the port the extension speaks to, and a run that
+    // said nothing about that would have someone debugging the extension instead.
+    assert.match(said[0], new RegExp(`^WARNING {2}LOCAL_ARTIFACT_PORT=${bridge.port} - the extension only talks to 127\\.0\\.0\\.1:4517`));
+    assert.match(said.at(-1), install);
     // From the state on disk, not /health: the script's own process is the session, and asking
     // /health after it has exited prunes the very session whose claim is being checked.
+    const state = JSON.parse(fs.readFileSync(path.join(bridge.stateDir, `previews-${bridge.port}.json`), 'utf8'));
+    assert.equal(state.primaryKey, `p${pid}`);
+  });
+
+  test('claims the browser for its session and says the monitor is listening', async () => {
+    await seenExtension(bridge);
+    const { code, out, err, pid } = await run(named(), [SCRIPT], bridge.port, { monitor: true });
+    assert.equal(code, 0);
+    // The port warning and nothing else: with an extension in the browser there is no failure.
+    assert.match(err.trim(), /^WARNING {2}LOCAL_ARTIFACT_PORT=/);
+    assert.equal(err.trim().split('\n').length, 1);
+    assert.match(out, new RegExp(`^connect {2}session p${pid} \\(`));
+    assert.match(out, /\nextension {2}seen \d+s ago\n/);
+    assert.match(out, /\n {2}monitor listening\n$/);
     const state = JSON.parse(fs.readFileSync(path.join(bridge.stateDir, `previews-${bridge.port}.json`), 'utf8'));
     assert.equal(state.primaryKey, `p${pid}`);
   });

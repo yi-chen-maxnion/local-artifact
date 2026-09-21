@@ -101,6 +101,25 @@ export async function connect(bridge, key) {
 }
 
 /**
+ * A Chrome extension id, in the shape the daemon insists on: thirty-two letters a-p.
+ */
+export const EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
+
+/**
+ * The extension saying it is there, which is what every request from its service worker does:
+ * `x-cc-ext` beside a chrome-extension Origin. Anything that then reports status - /health, and
+ * through it scripts/connect.mjs, scripts/ctl.mjs and scripts/open.mjs - says the extension is
+ * installed only once this has happened.
+ */
+export async function seenExtension(bridge, id = EXTENSION_ID) {
+  const res = await bridge.request('/health', {
+    token: null, headers: { origin: `chrome-extension://${id}`, 'x-cc-ext': id },
+  });
+  assert.equal(res.status, 200);
+  return id;
+}
+
+/**
  * What the extension's service worker asks on every page load: whose session is this origin?
  * The raw Response, since a miss - nothing set up, an id that is not live - is a 404 a test wants.
  */
