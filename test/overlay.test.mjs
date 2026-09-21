@@ -18,7 +18,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detailLines } from '../lib/format.mjs';
-import { allElements, overlayWindow } from './dom.mjs';
+import { allElements, overlayWindow, waitFor } from './dom.mjs';
 
 const page = await overlayWindow();
 after(() => page.close());
@@ -631,5 +631,85 @@ describe('pageKey: which page a pin belongs to', () => {
     window.history.pushState({}, '', '/');
     assert.equal(pageKey(), '/');
     window.history.pushState({}, '', '/page?q=1#cc=abcdef1234');
+  });
+});
+
+/**
+ * The extension transport, which is not on the `__ccTest` seam and must not be: it is the one
+ * thing in this file that can reach outside the page, and the seam's rule is that nothing it
+ * hands out can. So it is driven the way the browser drives it, from outside.
+ *
+ * It is here because of a regression that every one of the tests above stayed green through.
+ * `askExtension` registers the settler for a reply under the message id, and one rewrite dropped
+ * that registration: the settler's own `if (!pending.delete(id)) return;` then fired on an answer
+ * AND on the timeout, so the promise never settled, either way. Send begins with an `await` on
+ * this transport, so the button simply spun forever and no comment ever reached the daemon.
+ *
+ * Nothing here needs a trusted event: the overlay asks the extension once at start-up, to decide
+ * whether screenshots are silent, and writes the answer onto the panel's screenshot line. That
+ * line is the observable - two different sentences for "yes" and "no", so the test can also tell
+ * an answer apart from a timeout - and it makes every ask a round trip through the real
+ * `askExtension`, in the page world, with no production code widened to see it.
+ *
+ * Each case gets its own window: `hasExtension` caches the answer in `extReady` for the life of
+ * the page, so one window could only ever be asked once.
+ */
+describe('askExtension: an ask always settles - answered, answered with rubbish, or not at all', () => {
+  const YES = 'Captured by the extension - no prompt';
+  const NO = 'No extension: each send asks to share the tab';
+  const shot = (page) => page.shadow.querySelector('.shot');
+
+  /** The ask itself: one ping, addressed to the relay, carrying an id for the answer to come back on. */
+  const assertPinged = (page) => {
+    assert.deepEqual(page.requests.map((r) => r.type), ['ping']);
+    const [req] = page.requests;
+    assert.equal(req.__cc, 'req');
+    assert.equal(typeof req.id, 'number');
+    // Its own keys, not the object: it was built in the jsdom realm, where `{}` is a different
+    // `Object` from this file's and a strict deep-equal against one fails on the prototype alone.
+    assert.deepEqual(Object.keys(req.payload), []);
+  };
+
+  test('an answered ping settles, well inside the timeout it never reaches', { timeout: 20000 }, async () => {
+    const page = await overlayWindow({
+      relay: (req, reply) => { if (req.type === 'ping') reply({ ok: true }); },
+    });
+    try {
+      // 1500ms is an assertion, not patience: the ping's own timeout is 2000ms, so settling
+      // inside this can only be the answer arriving, never the transport giving up on it.
+      await waitFor(() => shot(page).title === YES, 'the answered ping never reached its caller', 1500);
+      assert.ok(shot(page).classList.contains('auto'));
+      assert.equal(page.shadow.querySelector('.shottext').textContent, 'screenshot attached');
+      assertPinged(page);
+    } finally {
+      page.close();
+    }
+  });
+
+  // `respond()` with no argument, a port that closed, or - in the page world, which the page
+  // itself shares - anything at all posted at the window under a matching id.
+  test('an answer that is not an object settles as the empty-answer error', { timeout: 20000 }, async () => {
+    const page = await overlayWindow({ relay: (req, reply) => reply(undefined) });
+    try {
+      await waitFor(() => shot(page).title === NO, 'an empty answer left the caller waiting', 1500);
+      assert.ok(!shot(page).classList.contains('auto'));
+      assertPinged(page);
+    } finally {
+      page.close();
+    }
+  });
+
+  // The case that hung. Nothing answers - no relay, no extension, the state of any page the
+  // bridge serves to a browser without the extension - and the only thing that can settle the
+  // promise is the transport's own timeout.
+  test('an unanswered ping settles on the timeout instead of waiting forever', { timeout: 20000 }, async () => {
+    const page = await overlayWindow();
+    try {
+      await waitFor(() => shot(page).title === NO, 'the unanswered ping never timed out - Send would spin forever', 6000);
+      assert.ok(!shot(page).classList.contains('auto'));
+      assertPinged(page);
+    } finally {
+      page.close();
+    }
   });
 });

@@ -77,6 +77,7 @@
           error: 'the extension sent an empty answer - refresh this page', code: 'extension_empty',
         });
       };
+      pending.set(id, finish);
       setTimeout(() => finish({
         error: 'the extension did not answer - refresh this page', code: 'extension_timeout',
       }), timeout);
@@ -1989,19 +1990,28 @@
     setStatus('');
     const anchor = state.anchor;
     const loc = state.hlSource;
-    const ext = await hasExtension();
-    // The frame taken when this anchor was picked (see `preCapture`). With it, nothing on the page
-    // has to step aside now: the panel closes and a pin appears, and that is all that moves.
-    const pre = preShot?.anchor === anchor ? await preShot.promise : null;
-    const early = Boolean(pre?.frame?.dataUrl);
-    // Without it, a frame is taken now, the overlay stepping out of it. Only if something is
-    // actually going to be captured - with no extension and no screenshot asked for there is
-    // nothing to hide from, and hiding anyway is a flicker that buys nothing.
-    const capturing = !early && (ext || state.wantShot);
+    // Read by the catch, which has to know whether anything has stepped aside yet. Declared out
+    // here so that a failure before it is decided still finds it, and false is the truth then.
+    let capturing = false;
     // The panel stays open and keeps the anchor outlined until the comment is actually in the
     // session. Closing on click and reporting afterwards meant a failure had nowhere to land
     // but a toast, with the typed comment already gone.
+    //
+    // The two awaits that decide `capturing` are inside this try rather than above it, because
+    // `state.busy` and the disabled buttons are only ever given back by its `finally`. Above it,
+    // anything that threw there left the panel wedged on a spinner with no way out but a reload -
+    // which is exactly how a dropped line in `askExtension` presented itself. The happy path is
+    // the same expressions in the same order, and the first thing after them is still the veil.
     try {
+      const ext = await hasExtension();
+      // The frame taken when this anchor was picked (see `preCapture`). With it, nothing on the page
+      // has to step aside now: the panel closes and a pin appears, and that is all that moves.
+      const pre = preShot?.anchor === anchor ? await preShot.promise : null;
+      const early = Boolean(pre?.frame?.dataUrl);
+      // Without it, a frame is taken now, the overlay stepping out of it. Only if something is
+      // actually going to be captured - with no extension and no screenshot asked for there is
+      // nothing to hide from, and hiding anyway is a flicker that buys nothing.
+      capturing = !early && (ext || state.wantShot);
       if (capturing) { await veil(true); await settlePaint(); }
       // A wedged extension or a stalled share-tab prompt must never cost the comment.
       const shot = early ? await encodeFrame(pre.frame, pre.rect) : capturing ? await Promise.race([
