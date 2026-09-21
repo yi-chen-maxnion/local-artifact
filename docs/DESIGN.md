@@ -86,10 +86,11 @@ enough to try.
 - **The relay only exists on pages the bridge serves**, and only carries `ping` and `capture`.
   Those pages load the overlay with a `<script>` tag, so it runs in their world; their comments go
   straight to the bridge, which is their own origin.
-- **The bridge takes an automatically bound origin's comments only from the extension.** A pin's
-  storage key carries its preview id, and the page can read its own `localStorage` — so posting
-  that id straight to the bridge from the page is refused. An origin opened explicitly with
-  `/preview` still accepts posts from the page itself; that is what the bookmarklet uses.
+- **The bridge takes a comment from the extension and from nowhere else.** A pin's storage key
+  carries its preview id, and the page can read its own `localStorage` — so posting that id
+  straight to the bridge from the page is refused, whatever page it is. A request with no
+  `Origin` at all is refused too: that is not the extension either, and a comment arrives as
+  something the user said.
 - **The console capture is the one piece in the page world**, because that is where the page's
   console is. It hands lines to the overlay as DOM events, which a page can fake — all that
   reaches is the `console` field of a comment the user is sending. It guards every step and

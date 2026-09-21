@@ -118,9 +118,12 @@ export async function preview(bridge, key, target) {
 }
 
 /**
- * A comment the way a page sends one: no control token, and a body a real overlay could have
- * produced. Everything in `fields` goes into that body - `after`, `page`, `screenshot`, `capture`
- * - except `headers`, which is lifted out for the `origin` these tests keep varying.
+ * A comment the way the extension sends one: no control token, and a body a real overlay could
+ * have produced. Everything in `fields` goes into that body - `after`, `page`, `screenshot`,
+ * `capture` - except `headers`, which is lifted out for the `origin` these tests keep varying.
+ *
+ * The extension's Origin by default, because that is the only caller /comment takes: a test about
+ * that rule names its own `headers` (a page's origin, or none at all).
  *
  * The raw Response, not the parsed body: what most of these tests assert on is the status, and
  * several of them want a failure.
@@ -128,7 +131,7 @@ export async function preview(bridge, key, target) {
 export function comment(bridge, previewId, { headers, ...fields } = {}) {
   return bridge.request('/comment', {
     token: null,
-    headers,
+    headers: headers || { origin: 'chrome-extension://abc' },
     json: {
       previewId,
       comment: 'make it blue',

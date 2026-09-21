@@ -154,27 +154,6 @@ function readBody(req) {
   });
 }
 
-/**
- * This payload lands directly in a model's context, so the surface is treated as hostile:
- * loopback-only bind, unguessable previewId, and a caller that must prove it is our own page,
- * the extension, or a page the user explicitly opened.
- */
-function originAllowed(req, preview) {
-  const origin = req.headers.origin;
-  if (!origin) return true; // not a browser: browsers always send Origin on a POST
-  if (origin === ORIGIN) return true;
-  /**
-   * The extension's own service worker, which is where comments from every extension-bound page
-   * come from. A web page cannot forge this scheme, and the overlay that asks the worker to send
-   * runs in the extension's isolated world, out of the page's reach.
-   */
-  if (isExtension(origin)) return true;
-  // A page's own origin is trusted only where the user opened it with /preview - the bookmarklet
-  // path. An origin bound automatically is any site the browser happens to visit, and a script
-  // on one of those could otherwise post a comment in the user's name.
-  return Boolean(preview.claimed) && preview.origin === origin;
-}
-
 function saveState() {
   try {
     writeFileAtomic(STATE_FILE, JSON.stringify({
@@ -603,7 +582,19 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       const pv = previews.get(b.previewId);
       if (!pv) return json(res, 404, { error: 'unknown preview' });
-      if (!originAllowed(req, pv)) return json(res, 403, { error: 'origin not allowed' });
+      /**
+       * This payload lands directly in a model's context, so the surface is treated as hostile:
+       * loopback-only bind, unguessable previewId, and a caller that has to be the extension's
+       * own service worker. A web page cannot forge that scheme, and the overlay that asks the
+       * worker to send runs in the extension's isolated world, out of the page's reach.
+       *
+       * Strict rather than `extensionOnly`: a request with no Origin at all - curl, any other
+       * process on this machine - is not the extension either, and a comment is something the
+       * user is said to have written.
+       */
+      if (!isExtension(req.headers.origin)) {
+        return json(res, 403, { error: 'only the extension may send a comment' });
+      }
       // The monitor may not have re-registered yet after a daemon restart. The session process
       // being alive is enough - the event lands in the replay buffer and is delivered on reconnect.
       if (!pidAlive(pv.sessionPid) && !sessions.has(pv.sessionKey)) {

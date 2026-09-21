@@ -163,21 +163,19 @@ describe('bridge', () => {
       assert.equal((await (await comment(bridge, previewId, other)).json()).n, 1);
     });
 
-    test('an automatically bound origin accepts the extension, not the page itself', async () => {
+    // The preview id is not a secret a page cannot reach: a pin's storage key carries it, and the
+    // page can read its own localStorage. What says a comment is the user's is where it came from.
+    test('comes from the extension or from nowhere', async () => {
       const origin = 'https://deployed.example';
       const res = await bridge.request(`/resolve?origin=${encodeURIComponent(origin)}`, { token: null });
       const { previewId } = await res.json();
       assert.ok(previewId);
+      // The page's own origin, whatever page it is - a script on it would be writing in the user's name.
       assert.equal((await comment(bridge, previewId, { headers: { origin } })).status, 403);
+      // No Origin at all: curl, or anything else running on this machine.
+      assert.equal((await comment(bridge, previewId, { headers: {} })).status, 403);
       const ext = { headers: { origin: 'chrome-extension://abc' } };
       assert.equal((await comment(bridge, previewId, ext)).status, 200);
-    });
-
-    test('an origin opened with /preview accepts the page, for the bookmarklet', async () => {
-      const { previewId } = await preview(bridge, key, 'http://localhost:8123/');
-      const page = (origin) => comment(bridge, previewId, { headers: { origin } });
-      assert.equal((await page('http://localhost:8123')).status, 200);
-      assert.equal((await page('http://localhost:9999')).status, 403);
     });
   });
 
