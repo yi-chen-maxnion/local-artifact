@@ -7,9 +7,9 @@
  * of them come back as "the anchor is not on this page" days later. Clicking around does not
  * find them; this does.
  *
- * The file is loaded, not imported: it is one classic-script IIFE with three loaders, so the
- * only honest test is to execute what the browser executes and take the pure functions it hands
- * out through its `__ccTest` seam. See test/dom.mjs.
+ * The file is loaded, not imported: it is one classic-script IIFE the extension injects, so the
+ * only honest test is to execute what the browser executes and take what it hands out through
+ * its `__ccTest` seam. See test/dom.mjs.
  *
  * Caveat worth knowing when reading a failure: jsdom has no layout, so every rect is zero and
  * `innerText` is undefined - the overlay falls back to `textContent`, which is what the text
@@ -18,7 +18,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detailLines } from '../lib/format.mjs';
-import { allElements, overlayWindow, waitFor } from './dom.mjs';
+import { allElements, overlayWindow } from './dom.mjs';
 
 const page = await overlayWindow();
 after(() => page.close());
@@ -611,105 +611,108 @@ describe('findQuote: the quoted text, found again across node boundaries', () =>
 });
 
 describe('pageKey: which page a pin belongs to', () => {
-  test('path and query, never the hash - which is where the preview token lives', () => {
-    assert.equal(window.location.href, 'http://localhost:5173/page?q=1#cc=abcdef1234');
+  test('path and query, never the hash - which is where a single-page app keeps its route', () => {
+    assert.equal(window.location.href, 'http://localhost:5173/page?q=1#/route');
     assert.equal(pageKey(), '/page?q=1');
     assert.equal(pageKey(), window.location.pathname + window.location.search);
     assert.ok(!pageKey().includes('#'));
-    assert.ok(!pageKey().includes('cc='));
+    assert.ok(!pageKey().includes('/route'));
   });
 
   test('it moves with the page under a single-page app, hash changes aside', () => {
-    window.history.pushState({}, '', '/other/route?tab=2#cc=abcdef1234&x=1');
+    window.history.pushState({}, '', '/other/route?tab=2#/deep&x=1');
     assert.equal(pageKey(), '/other/route?tab=2');
     window.location.hash = 'somewhere-else';
     assert.equal(pageKey(), '/other/route?tab=2');
-    window.history.pushState({}, '', '/page?q=1#cc=abcdef1234'); // leave it as it was found
+    window.history.pushState({}, '', '/page?q=1#/route'); // leave it as it was found
   });
 
   test('a bare path with no query is just the path', () => {
     window.history.pushState({}, '', '/');
     assert.equal(pageKey(), '/');
-    window.history.pushState({}, '', '/page?q=1#cc=abcdef1234');
+    window.history.pushState({}, '', '/page?q=1#/route');
   });
 });
 
 /**
- * The extension transport, which is not on the `__ccTest` seam and must not be: it is the one
- * thing in this file that can reach outside the page, and the seam's rule is that nothing it
- * hands out can. So it is driven the way the browser drives it, from outside.
+ * The extension transport, driven straight through the `__ccTest` seam.
  *
- * It is here because of a regression that every one of the tests above stayed green through.
+ * It is on that seam for one reason: this file runs in the extension's isolated world and nowhere
+ * else, so the `window.__ccTest` a page defines is a different object in a different world and is
+ * never called. Were a page-world loader ever reintroduced, `askExtension` would have to come off
+ * the seam first - it is the one thing here that can reach outside the page - and this suite would
+ * have to go back to driving it from outside.
+ *
+ * It exists because of a regression that every one of the tests above stayed green through.
  * `askExtension` registers the settler for a reply under the message id, and one rewrite dropped
  * that registration: the settler's own `if (!pending.delete(id)) return;` then fired on an answer
  * AND on the timeout, so the promise never settled, either way. Send begins with an `await` on
  * this transport, so the button simply spun forever and no comment ever reached the daemon.
  *
- * Nothing here needs a trusted event: the overlay asks the extension once at start-up, to decide
- * whether screenshots are silent, and writes the answer onto the panel's screenshot line. That
- * line is the observable - two different sentences for "yes" and "no", so the test can also tell
- * an answer apart from a timeout - and it makes every ask a round trip through the real
- * `askExtension`, in the page world, with no production code widened to see it.
- *
- * Each case gets its own window: `hasExtension` caches the answer in `extReady` for the life of
- * the page, so one window could only ever be asked once.
+ * One window, with the worker's answer swapped per case, and short timeouts passed in: every case
+ * here is about how an ask ENDS, so none of them may take the four seconds a real one is allowed.
  */
-describe('askExtension: an ask always settles - answered, answered with rubbish, or not at all', () => {
-  const YES = 'Captured by the extension - no prompt';
-  const NO = 'No extension: each send asks to share the tab';
-  const shot = (page) => page.shadow.querySelector('.shot');
+let answer = null;
+const ext = await overlayWindow({ sendMessage: (msg, respond) => answer?.(msg, respond) });
+after(() => ext.close());
 
-  /** The ask itself: one ping, addressed to the relay, carrying an id for the answer to come back on. */
-  const assertPinged = (page) => {
-    assert.deepEqual(page.requests.map((r) => r.type), ['ping']);
-    const [req] = page.requests;
-    assert.equal(req.__cc, 'req');
-    assert.equal(typeof req.id, 'number');
+describe('askExtension: an ask always settles - answered, answered with rubbish, or not at all', () => {
+  const { askExtension } = ext.api;
+  const lastAsk = () => ext.requests[ext.requests.length - 1];
+
+  test('an answered ask resolves with the worker\'s own answer', async () => {
+    answer = (msg, respond) => respond({ ok: true, saw: msg.type });
+    assert.deepEqual(await askExtension('ping', {}, 500), { ok: true, saw: 'ping' });
+    assert.equal(lastAsk().type, 'ping');
     // Its own keys, not the object: it was built in the jsdom realm, where `{}` is a different
     // `Object` from this file's and a strict deep-equal against one fails on the prototype alone.
-    assert.deepEqual(Object.keys(req.payload), []);
-  };
+    assert.deepEqual(Object.keys(lastAsk().payload), []);
+  });
 
-  test('an answered ping settles, well inside the timeout it never reaches', { timeout: 20000 }, async () => {
-    const page = await overlayWindow({
-      relay: (req, reply) => { if (req.type === 'ping') reply({ ok: true }); },
-    });
+  // `respond()` with no argument, or a port that closed under it: the caller reads `.error` off
+  // whatever comes back, and `undefined` has none to read.
+  test('an answer that is not an object settles as the empty-answer error', async () => {
+    answer = (msg, respond) => respond(undefined);
+    const out = await askExtension('capture', {}, 500);
+    assert.equal(out.code, 'extension_empty');
+    assert.match(out.error, /refresh this page/);
+  });
+
+  // The case that hung: the worker takes the message and never answers - a service worker killed
+  // mid-flight - and the only thing that can settle the promise is the transport's own timeout.
+  test('an ask nothing answers settles on the timeout instead of waiting forever', async () => {
+    answer = () => {};
+    const at = Date.now();
+    const out = await askExtension('capture', {}, 150);
+    assert.equal(out.code, 'extension_timeout');
+    assert.ok(Date.now() - at < 2000, 'it waited far longer than the timeout it was given');
+  });
+
+  // A message-less `lastError` would otherwise be an answer with an empty `error`, which reads as
+  // success - a comment reported as sent that never left the browser.
+  test('a lastError is an error, even when nothing was said with it', async () => {
+    const failing = (err) => (msg, respond) => { ext.chrome.runtime.lastError = err; respond(); };
     try {
-      // 1500ms is an assertion, not patience: the ping's own timeout is 2000ms, so settling
-      // inside this can only be the answer arriving, never the transport giving up on it.
-      await waitFor(() => shot(page).title === YES, 'the answered ping never reached its caller', 1500);
-      assert.ok(shot(page).classList.contains('auto'));
-      assert.equal(page.shadow.querySelector('.shottext').textContent, 'screenshot attached');
-      assertPinged(page);
+      answer = failing({ message: 'the message port closed' });
+      // Its own field, not the object: this one was built in the jsdom realm.
+      assert.equal((await askExtension('comment', {}, 500)).error, 'the message port closed');
+      answer = failing({});
+      assert.match((await askExtension('comment', {}, 500)).error, /could not be reached/);
     } finally {
-      page.close();
+      ext.chrome.runtime.lastError = undefined;
     }
   });
 
-  // `respond()` with no argument, a port that closed, or - in the page world, which the page
-  // itself shares - anything at all posted at the window under a matching id.
-  test('an answer that is not an object settles as the empty-answer error', { timeout: 20000 }, async () => {
-    const page = await overlayWindow({ relay: (req, reply) => reply(undefined) });
+  // Reloading the extension orphans this script: it keeps running with `chrome.runtime.id` gone.
+  test('an orphaned script says the extension was reloaded, and sends nothing', async () => {
+    answer = (msg, respond) => respond({ ok: true });
+    const before = ext.requests.length;
+    ext.chrome.runtime.id = '';
     try {
-      await waitFor(() => shot(page).title === NO, 'an empty answer left the caller waiting', 1500);
-      assert.ok(!shot(page).classList.contains('auto'));
-      assertPinged(page);
+      assert.match((await askExtension('capture', {}, 500)).error, /the extension was reloaded/);
+      assert.equal(ext.requests.length, before, 'it asked anyway');
     } finally {
-      page.close();
-    }
-  });
-
-  // The case that hung. Nothing answers - no relay, no extension, the state of any page the
-  // bridge serves to a browser without the extension - and the only thing that can settle the
-  // promise is the transport's own timeout.
-  test('an unanswered ping settles on the timeout instead of waiting forever', { timeout: 20000 }, async () => {
-    const page = await overlayWindow();
-    try {
-      await waitFor(() => shot(page).title === NO, 'the unanswered ping never timed out - Send would spin forever', 6000);
-      assert.ok(!shot(page).classList.contains('auto'));
-      assertPinged(page);
-    } finally {
-      page.close();
+      ext.chrome.runtime.id = 'testextensionid';
     }
   });
 });

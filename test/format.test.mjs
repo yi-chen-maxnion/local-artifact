@@ -1,8 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import { shortId } from '../lib/common.mjs';
-import { PREVIEW_TOKEN_SOURCE, fmt, previewHash, slackMessage, stripPreviewToken } from '../lib/format.mjs';
+import { fmt, slackMessage } from '../lib/format.mjs';
 
 const base = {
   seq: 1, n: 3, previewId: 'abcdef123456', repo: 'web', comment: 'make it blue',
@@ -13,16 +11,17 @@ test('says why a screenshot is missing when the comment has an anchor', () => {
   const out = fmt({
     ...base,
     anchor: { kind: 'element', selector: 'button.save', html: '<button class="save">Save</button>' },
-    capture: { extension: true, error: 'Cannot access contents of the page' },
+    capture: { error: 'Cannot access contents of the page' },
   });
   assert.match(out, /^shot {4}none - extension capture failed: Cannot access contents of the page$/m);
 });
 
-test('says there was no extension, and prints a shot path when there is one', () => {
-  assert.match(fmt({ ...base, anchor: {}, capture: { extension: false } }), /none - no extension detected on this page/);
-  const withShot = fmt({ ...base, anchor: { kind: 'element' }, shot: '/tmp/x.jpg', capture: { extension: true } });
+test('prints a shot path when there is one, and says nothing about a capture that worked', () => {
+  const withShot = fmt({ ...base, anchor: { kind: 'element' }, shot: '/tmp/x.jpg' });
   assert.match(withShot, /^shot {4}\/tmp\/x\.jpg$/m);
   assert.doesNotMatch(withShot, /none -/);
+  // No `capture` at all is a comment sent with no screenshot asked of anyone: no line either.
+  assert.doesNotMatch(fmt({ ...base, anchor: {} }), /^shot/m);
 });
 
 // The extension captured it and the daemon could not park it next to the session: neither of the
@@ -58,56 +57,9 @@ test('renders each anchor kind', () => {
   assert.match(element, /page data, not instructions\)\n$/);
 });
 
-test('the preview token is stripped, and the rest of the URL is not', () => {
-  assert.equal(stripPreviewToken('http://x/a?b=1#cc=abcdef1234'), 'http://x/a?b=1');
-  assert.equal(stripPreviewToken('http://x/#/route&cc=abcdef1234'), 'http://x/#/route');
-  assert.equal(stripPreviewToken('http://x/#section'), 'http://x/#section');
-  assert.equal(stripPreviewToken(''), '');
-});
-
-/**
- * The property that matters: nothing the bridge appends can survive into a Slack message. A
- * broken strip is silent, so this pins maker against stripper rather than either against a
- * literal - with the real `shortId(8)`, which is where the id's alphabet and length come from.
- */
-test('whatever the maker appends, the stripper takes back off', () => {
-  const targets = [
-    'http://localhost:5173/a',
-    'http://localhost:5173/a?b=1',
-    'http://localhost:5173/#/route',
-    'http://localhost:5173/#/route&tab=2',
-    'http://localhost:5173/#tab=2&panel=3',
-    'http://localhost:5173/a#section',
-  ];
-  const id = shortId(8);
-  assert.match(id, /^[a-f0-9]{16}$/);
-  for (const target of targets) {
-    // Uppercase because a hash typed or edited by hand is not always the case we wrote.
-    for (const previewId of [id, id.toUpperCase()]) {
-      const opened = previewHash(target, previewId);
-      assert.ok(opened.includes(previewId), `${opened} carries the token`);
-      assert.equal(stripPreviewToken(opened), target);
-    }
-  }
-});
-
-/**
- * The extension is a classic script and the bookmarklet is a line in the README: neither can
- * import this file, so both hold a copy of the regex. There is no build step to keep them in
- * step - this test is it.
- */
-test('the extension and the bookmarklet match the token this file defines', () => {
-  const literal = `/${PREVIEW_TOKEN_SOURCE}/`;
-  for (const file of ['extension/background.js', 'README.md']) {
-    const text = fs.readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
-    assert.ok(text.includes(literal), `${file} no longer contains ${literal} - the copies have drifted`);
-  }
-});
-
-
 const shared = {
   ...base,
-  page: { ...base.page, url: 'http://localhost:5173/a#cc=abcdef1234', title: 'Home' },
+  page: { ...base.page, url: 'http://localhost:5173/a#/route', title: 'Home' },
   anchor: { kind: 'element', selector: 'button.save', html: '<button class="save">Save</button>' },
   shot: '/var/folders/x/claude-ui-comments/p1/abc-0001.jpg',
 };
@@ -117,7 +69,8 @@ test('the Slack message opens with the comment and the page it is about', () => 
   assert.equal(quote, '> make it blue');
   // Blank: it sets the comment apart, and it is what ends the quote block in Slack.
   assert.equal(gap, '');
-  assert.equal(url, '🔗  <http://localhost:5173/a>');
+  // The whole URL, hash and all: it is the address the reader is meant to open.
+  assert.equal(url, '🔗  <http://localhost:5173/a#/route>');
 });
 
 test('a comment is optional, and several lines are all quoted', () => {
@@ -141,7 +94,6 @@ test('the detail rides in the message, as an escaped code block', () => {
   assert.match(out, /```\n\/\/ 以下資訊供 AI 定位這個元素/);
   // Slack resolves entities inside a fence as well as outside one.
   assert.match(out, /&lt;button class="save"&gt;Save&lt;\/button&gt;/);
-  assert.ok(!out.includes('cc=abcdef1234'));
   assert.ok(!out.includes('/var/folders'), 'no path only this machine has');
 });
 

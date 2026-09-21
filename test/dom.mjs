@@ -1,12 +1,11 @@
 /**
- * Runs the real, unmodified extension/overlay.js inside a DOM, and hands back the pure
- * functions it exposes through its `window.__ccTest` seam.
+ * Runs the real, unmodified extension/overlay.js inside a DOM, and hands back what it exposes
+ * through its `window.__ccTest` seam.
  *
- * The overlay is one classic-script IIFE loaded three different ways (extension injection,
- * a <script src> from the bridge, the README bookmarklet), so it is deliberately not split
- * into modules and cannot be imported. The only honest way to test it is to execute the file
- * the browser executes - which is what jsdom is the single devDependency for. Nothing under
- * lib/, bridge/, scripts/ or extension/ may import from here.
+ * The overlay is one classic-script IIFE injected into the extension's isolated world, so it is
+ * deliberately not split into modules and cannot be imported. The only honest way to test it is
+ * to execute the file the browser executes - which is what jsdom is the single devDependency
+ * for. Nothing under lib/, bridge/, scripts/ or extension/ may import from here.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -43,16 +42,17 @@ const SOURCE = fs.readFileSync(OVERLAY_SRC, 'utf8');
  * costs about a tenth of a second; building one per fixture would cost more than the rest of the
  * suite put together.
  *
- * `chrome` is absent, which is the bridge-served/bookmarklet path: the overlay decides `isolated`
- * once at start-up, so this is the world the seam is reasoned about in.
+ * The world is the one the extension injects into: `window.__ccConfig` is written first, and
+ * `window.chrome` stands in for the extension - exactly the members the overlay touches at
+ * start-up (`runtime.id`, `storage.local.get`, `storage.onChanged.addListener`) plus the
+ * `runtime.sendMessage`/`runtime.lastError` pair its transport uses.
  *
- * `relay` stands in for extension/content.js. In the page world the overlay asks the extension by
- * posting `{ __cc: 'req', id, type, payload }` at its own window and reading the answer off a
- * `{ __cc: 'res', id, payload }` message; given a relay, `relay(req, reply)` is called for each
- * ask and `reply(payload)` answers it. Every ask is recorded in `requests` either way, so a test
- * can also assert on what was asked while nothing answers.
+ * `sendMessage(msg, respond)` is the worker: it is called for each ask, `respond(payload)`
+ * answers it, and not calling `respond` is a worker that never answers. Every ask is recorded in
+ * `requests` either way, so a test can also assert on what was asked while nothing answers. The
+ * fake is returned as `chrome`, so a test can also take the extension away mid-flight.
  */
-export async function overlayWindow({ url = 'http://localhost:5173/page?q=1#cc=abcdef1234', relay = null } = {}) {
+export async function overlayWindow({ url = 'http://localhost:5173/page?q=1#/route', sendMessage = null } = {}) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', {
     url,
     runScripts: 'dangerously',
@@ -64,17 +64,32 @@ export async function overlayWindow({ url = 'http://localhost:5173/page?q=1#cc=a
   let api = null;
   window.__ccTest = (exposed) => { api = exposed; };
 
-  // Listening before the overlay loads, because the first ask is made at start-up. jsdom leaves
-  // `source` null on a `postMessage`, and the overlay ignores any answer whose source is not its
-  // own window - so an answer is dispatched as the MessageEvent a browser would have delivered.
   const requests = [];
-  window.addEventListener('message', (e) => {
-    if (e.data?.__cc !== 'req') return;
-    requests.push(e.data);
-    relay?.(e.data, (payload) => window.dispatchEvent(new window.MessageEvent('message', {
-      data: { __cc: 'res', id: e.data.id, payload }, source: window, origin: window.origin,
-    })));
-  });
+  /**
+   * The extension, as much of it as the overlay touches. `lastError` is writable because that is
+   * how Chrome reports a failed `sendMessage`: the callback runs with no answer and the error
+   * sitting on `chrome.runtime`.
+   */
+  const chrome = {
+    runtime: {
+      id: 'testextensionid',
+      lastError: undefined,
+      sendMessage(msg, respond) {
+        requests.push(msg);
+        sendMessage?.(msg, respond);
+      },
+    },
+    storage: {
+      local: { get: async () => ({}), set: async () => {} },
+      onChanged: { addListener() {} },
+    },
+  };
+  window.chrome = chrome;
+  // Written into this world by the service worker immediately before the overlay is injected;
+  // without it the overlay draws nothing at all.
+  window.__ccConfig = {
+    previewId: 'abcdef1234', origin: 'http://127.0.0.1:4317', repo: 'repo', slack: null,
+  };
 
   /**
    * The overlay's UI lives in a CLOSED shadow root, so `host.shadowRoot` is null - that is the
@@ -91,12 +106,10 @@ export async function overlayWindow({ url = 'http://localhost:5173/page?q=1#cc=a
     return root;
   };
 
-  // An inline <script> with the data- attributes the bridge writes: this is the loader whose
-  // `document.currentScript.dataset` branch the overlay reads its config from.
+  // What `chrome.scripting.executeScript` does, in the one way jsdom can do it: the file is run
+  // in this window, with the config and the extension already there.
   try {
     const script = window.document.createElement('script');
-    script.dataset.ccPreview = 'abcdef1234';
-    script.dataset.ccOrigin = 'http://127.0.0.1:4317';
     script.textContent = SOURCE;
     window.document.body.appendChild(script);
     script.remove();
@@ -115,8 +128,9 @@ export async function overlayWindow({ url = 'http://localhost:5173/page?q=1#cc=a
     window,
     document: window.document,
     api,
-    /** The overlay's own closed shadow root, and every `{ __cc: 'req' }` it has posted. */
+    /** The overlay's own closed shadow root, the fake extension, and every message sent to it. */
     shadow,
+    chrome,
     requests,
     /** Replaces the whole page. Returns the document for convenience. */
     setBody(html) {
@@ -130,9 +144,9 @@ export async function overlayWindow({ url = 'http://localhost:5173/page?q=1#cc=a
 
 /**
  * Waits for something the overlay does asynchronously, and FAILS rather than hangs when it never
- * happens - the whole point of the transport tests below is a promise that never settled, and a
- * test that waits forever on one reports nothing at all. `within` is also an assertion: a deadline
- * shorter than the overlay's own timeout is how "it answered" is told apart from "it timed out".
+ * happens: the failures worth catching here are promises that never settle, and a test that waits
+ * forever on one reports nothing at all. `within` is also an assertion - a deadline shorter than
+ * the overlay's own timeout is how "it answered" is told apart from "it timed out".
  */
 export async function waitFor(cond, message, within = 4000) {
   const until = Date.now() + within;

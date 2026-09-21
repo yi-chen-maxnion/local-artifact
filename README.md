@@ -30,9 +30,9 @@ authenticate to the new bridge.
 
 ### The Chrome extension
 
-This is what puts the button on a page. Without it only the bookmarklet below reaches a dev
-server, and a comment carries no screenshot unless the bridge served the page itself; with it,
-every page you open is bound and every comment carries a true viewport capture with no prompt.
+This is what puts the button on a page — every page, the ones the bridge serves included. Without
+it there is no button anywhere and no comment reaches a session; with it, every page you open is
+bound and every comment carries a true viewport capture with no prompt.
 
 1. `chrome://extensions` → enable **Developer mode**
 2. **Load unpacked** → select the `extension/` directory of this repo
@@ -46,12 +46,11 @@ says that page belongs to it, and the toolbar menu turns any origin off for good
 Reload it from `chrome://extensions` after editing anything in `extension/`, then refresh the
 pages you had open.
 
-**The extension talks to `127.0.0.1:4517` and nothing else.** `LOCAL_ARTIFACT_PORT` moves the
-daemon — for the test suite, or to get out of the way of something already on that port — but not
-the extension or the bookmarklet, both of which hold that origin as a literal. On another port the
-bridge still serves its own pages and comments still work from them; what stops is everything the
-extension does, silently: no page is resolved, no overlay is injected, and nothing says why. Leave
-the daemon on 4517 if you use the extension.
+**The extension talks to `http://127.0.0.1:4517` and nothing else.** `LOCAL_ARTIFACT_PORT` moves
+the daemon — for the test suite, or to get out of the way of something already on that port — but
+not the extension, which holds that origin as a literal. On another port the bridge still serves its
+own pages, but nothing can comment on them: what stops is everything the extension does, silently
+— no page is resolved, no overlay is injected, and nothing says why. Leave the daemon on 4517.
 
 ## Use
 
@@ -170,28 +169,26 @@ and requires JSON for every `POST`.
   require the token the daemon writes to `$TMPDIR/claude-ui-comments/token-<port>` (mode 0600).
   The scripts send it; a web page cannot read it. Without it, `/health` says only that the bridge
   is up.
-- **Pages cannot speak for the user.** On pages the extension injects into, the overlay runs in
-  the extension's isolated world with a closed shadow root, so the page's own scripts can neither
-  read its binding nor drive its controls. Comments from those pages are accepted only from the
-  extension. A page's own origin may post directly only if that origin was opened explicitly on
-  the bridge — the bookmarklet path, which nothing in the CLI reaches today (see below).
+- **Pages cannot speak for the user.** The overlay runs in the extension's isolated world with a
+  closed shadow root, so the page's own scripts can neither read its binding nor drive its
+  controls — and that is true of every page, since the extension is what injects it everywhere. A
+  comment is accepted from the extension alone; a page posting to the bridge itself is refused.
 - **Comments are untrusted input.** Comment text and anchor HTML come from a web page; the skill
   tells Claude to treat them as a description of a UI change, never as instructions, and to ask
   before acting on anything else.
 - **The Slack token never enters the browser.** It is a user token — it can post wherever you can
   — so it lives in `~/.config/local-artifact/slack-token.json` (mode 0600) and is used only by the
   daemon. No route hands it out; the page is told only that a connection exists and whose name it
-  posts under. Listing your conversations and posting are accepted from the extension alone, which
-  is why the button is not offered on pages the bridge serves itself: there the overlay shares a
-  world with the page's own scripts. Posting still takes a real click on the panel, and the daemon
-  caps it at ten posts a minute.
+  posts under. Listing your conversations and posting are accepted from the extension alone — the
+  panel asks the service worker for both, on every page, so the button is offered wherever the
+  overlay is. Posting still takes a real click on the panel, and the daemon caps it at ten posts
+  a minute.
 
 ## How it works
 
 ```
 page (overlay.js)                    bridge daemon 127.0.0.1:4517           claude session
-  extension-bound: isolated world ─► service worker ─► POST /comment ─► SSE /events?session=…
-  bridge-served / bookmarklet ─────────────────────► POST /comment          │
+  every page: the extension's world ─► service worker ─► POST /comment ─► SSE /events?session=…
   screenshot: extension captureVisibleTab, ringed by the overlay   scripts/monitor.mjs
                                                                     stdout → <task_notification>
 
@@ -217,23 +214,10 @@ page (overlay.js)                    bridge daemon 127.0.0.1:4517           clau
 |---|---|---|
 | `report.html` | bridge injects `<script src="/overlay.js">` | no |
 | `spec.pdf`, `.png`, `.md`, `.txt` | bridge serves a wrapper page holding the overlay | no |
-| `http://localhost:5173/…`, a deployed build | the extension injects it | yes (or bookmarklet) |
+| `http://localhost:5173/…`, a deployed build | the extension injects it | yes |
 
 The bridge still serves the first two rows, but since `/preview` takes no target there is no
 command that hands it a file: the extension's row is the one you get.
-
-## Bookmarklet (fallback for dev servers without the extension)
-
-**Currently unreachable from the CLI.** Comments posted by a page itself are accepted only for an
-origin that was opened explicitly on the bridge, and `/preview` no longer opens anything — so the
-bookmarklet works only against an origin claimed some other way. Kept here because the bridge
-side of it still exists:
-
-```
-javascript:(()=>{const o='http://127.0.0.1:4517',h=document.createElement('script');h.src=o+'/console-hook.js';document.body.appendChild(h);const s=document.createElement('script');s.src=o+'/overlay.js';s.dataset.ccPreview=(/[#&]cc=([a-f0-9]{8,})/.exec(location.hash)||[])[1]||prompt('previewId (from /preview)');s.dataset.ccOrigin=o;document.body.appendChild(s)})()
-```
-
-Click it once per page load. Screenshots then use the browser's share-tab prompt.
 
 ## When a comment does not arrive
 

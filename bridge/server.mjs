@@ -5,7 +5,6 @@ import {
   HOST, PORT, ORIGIN, PING_MS, ROOT, SESSION_KEY, STATE_FILE, TOKEN_FILE,
   codeBuild, pidAlive, rateLimiter, readToken, shortId, writeFileAtomic,
 } from '../lib/common.mjs';
-import { previewHash } from '../lib/format.mjs';
 import { Store, decodeShot } from './store.mjs';
 import { contentType, decodeSegments, isFile, kindOf, readIfFile, safeJoin } from './serve.mjs';
 import { gonePage, slackPage, wrapperPage } from './wrapper.mjs';
@@ -378,9 +377,9 @@ const server = http.createServer(async (req, res) => {
       // Opening a target IS a setup gesture too: it says which session the browser belongs to.
       claimBrowser(b.key);
       const { previewId, pv } = found;
-      const open = pv.external
-        ? previewHash(target, previewId)
-        : `${ORIGIN}/p/${previewId}/`;
+      // A web target is opened as it is: which session a tab belongs to is the extension's
+      // question to ask the bridge, not something carried in the address bar.
+      const open = pv.external ? target : `${ORIGIN}/p/${previewId}/`;
       return json(res, 200, { previewId, url: open, kind: pv.kind, external: pv.external, origin: pv.origin });
     }
 
@@ -407,20 +406,6 @@ const server = http.createServer(async (req, res) => {
         const s = slack.status();
         return s.connected ? { connected: true, user: s.user } : { connected: false };
       };
-      /**
-       * A tab that carries `#cc=` is already bound and is asking only what goes with that id: the
-       * tab /preview opened, and the way one tab is pinned to a session while several are running.
-       * Answering with whoever claimed this origin last would label it with the wrong session's
-       * repo, so an id that is not live on this origin is a miss rather than a fallback.
-       */
-      const wanted = url.searchParams.get('preview');
-      if (wanted) {
-        const pv = previews.get(wanted);
-        if (!pv || pv.origin !== origin || !sessions.has(pv.sessionKey)) {
-          return json(res, 404, { error: 'no live preview with that id on this origin' });
-        }
-        return json(res, 200, { previewId: wanted, repo: sessions.get(pv.sessionKey).repo, slack: slackFor() });
-      }
       const key = ownerOf(origin);
       const found = key && originPreview(key, origin);
       if (!found) {
@@ -610,7 +595,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       // The same key the overlay files its markers under, so the two agree about what "a page"
-      // is: path and query, never the hash - which is where our own #cc= token lives.
+      // is: path and query, never the hash - a route inside one page, not a page of its own.
       const page = pageKey(b.page?.url || '');
       const n = store.next(b.previewId, page, b.after);
       const at = ++seq;

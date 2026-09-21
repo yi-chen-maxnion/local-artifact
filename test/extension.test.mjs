@@ -1,18 +1,16 @@
-import { after, before, describe, test } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { HOST } from '../lib/common.mjs';
-import { preview, register, startBridge } from './helpers.mjs';
+import { startBridge } from './helpers.mjs';
 
 /**
  * What the extension cannot import, and therefore holds a copy of.
  *
- * The service worker is a classic script, the relay is a content script and the bookmarklet is a
- * line in the README: none of them can read `lib/common.mjs`, and there is no build step to hand
- * them anything. Where a copy drifts the symptom is silence - a comment sent to nobody, an overlay
- * that never appears - so the copies are pinned here, in text and, where it is a function, in
- * behaviour. Same idea as 'the extension and the bookmarklet match the token this file defines'
- * in test/format.test.mjs.
+ * The service worker is a classic script and the README is prose: neither can read
+ * `lib/common.mjs`, and there is no build step to hand them anything. Where a copy drifts the
+ * symptom is silence - a comment sent to nobody, an overlay that never appears - so the copies
+ * are pinned here, in text and, where it is a function, in behaviour.
  */
 const read = (rel) => fs.readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
 
@@ -39,13 +37,12 @@ function fnSource(text, name) {
 const strip = (src) => src.replace(/^(?:const|let|var)\s+[\w$]+\s*=\s*/, '').replace(/;\s*$/, '');
 const asFunction = (src) => new Function(`return (${strip(src)});`)();
 
-test('the service worker, the relay and the bookmarklet all speak to the default port', () => {
+test('the service worker and the README both speak to the default port', () => {
   assert.equal(DEFAULT_PORT, 4517);
   const origin = `http://${HOST}:${DEFAULT_PORT}`;
-  // `LOCAL_ARTIFACT_PORT` moves the daemon and none of these three, which is a thing the README
-  // has to say rather than a thing to fix: the relay pins the worker to the bridge's exact origin
-  // on purpose, and any other 127.0.0.1 dev server must not inherit that line.
-  for (const file of ['extension/background.js', 'extension/content.js', 'README.md']) {
+  // `LOCAL_ARTIFACT_PORT` moves the daemon and not the extension, which is a thing the README has
+  // to say rather than a thing to fix: the worker is pinned to the bridge's exact origin.
+  for (const file of ['extension/background.js', 'README.md']) {
     assert.ok(read(file).includes(origin), `${file} no longer contains ${origin} - the copies have drifted`);
   }
 });
@@ -110,7 +107,7 @@ test('the bridge numbers a page by the key the overlay computes', () => {
   const cases = [
     ['http://localhost:5173/', '/'],
     ['http://localhost:5173/a?x=1', '/a?x=1'],
-    ['http://localhost:5173/a?x=1#cc=abcdef1234', '/a?x=1'],
+    ['http://localhost:5173/a?x=1#/route', '/a?x=1'],
     // An SPA route in the hash is one page as far as numbering goes - that is the overlay's rule.
     ['http://localhost:5173/#/route', '/'],
     ['https://deployed.example', '/'],
@@ -120,62 +117,6 @@ test('the bridge numbers a page by the key the overlay computes', () => {
 });
 
 const EXT = { origin: 'chrome-extension://abc' };
-
-/**
- * The tab `/preview` opened is the one tab that knows which session it belongs to - it carries the
- * id in its hash - and it was the one tab with nothing to show for it: the worker bound it with an
- * empty repo, so the overlay's "sending to …" said nothing at all. It asks about that id now.
- */
-describe('/resolve for one preview in particular', () => {
-  const site = 'http://localhost:5312';
-  let bridge;
-  let mine;
-  let theirs;
-
-  const resolve = (query, headers = EXT) =>
-    bridge.request(`/resolve?origin=${encodeURIComponent(site)}${query}`, { token: null, headers });
-
-  before(async () => {
-    bridge = await startBridge();
-    // Two sessions in two repos, both of which have opened this dev server - the case the hash
-    // exists for, and the one where the origin's owner is the wrong answer for a given tab.
-    await register(bridge, `p${process.pid}`);
-    await bridge.request('/register', {
-      json: { key: `p${process.pid}1`, pid: process.pid, cwd: '/tmp/other', repo: 'other' },
-    });
-    mine = (await preview(bridge, `p${process.pid}`, `${site}/`)).previewId;
-    // Claims are ordered by the millisecond they were made, so the second needs a later one.
-    await new Promise((r) => setTimeout(r, 2));
-    theirs = (await preview(bridge, `p${process.pid}1`, `${site}/`)).previewId;
-  });
-  after(() => bridge.stop());
-
-  test('answers with the repo that id belongs to, not the origin owner\'s', async () => {
-    const owner = await (await resolve('')).json();
-    assert.equal(owner.previewId, theirs, 'the origin belongs to whoever opened it last');
-    assert.equal(owner.repo, 'other');
-
-    const res = await resolve(`&preview=${mine}`);
-    assert.equal(res.status, 200);
-    const j = await res.json();
-    assert.equal(j.previewId, mine);
-    assert.equal(j.repo, 'repo', 'the tab is labelled with its own session, not the later claim');
-    // And the rest of the binding comes with it, so a hash-bound tab is not left without Slack.
-    assert.equal(typeof j.slack?.connected, 'boolean');
-  });
-
-  test('a stale or foreign id is a miss, never the other session\'s answer', async () => {
-    assert.equal((await resolve('&preview=deadbeefdeadbeef')).status, 404);
-    // Live, but opened on a different origin: that tab is not this one.
-    const elsewhere = (await preview(bridge, `p${process.pid}`, 'http://localhost:5313/')).previewId;
-    assert.equal((await resolve(`&preview=${elsewhere}`)).status, 404);
-  });
-
-  test('and is still the extension\'s to ask, with an id as without', async () => {
-    assert.equal((await resolve(`&preview=${mine}`, { origin: site })).status, 403);
-    assert.equal((await resolve(`&preview=${mine}`, { 'sec-fetch-site': 'cross-site' })).status, 403);
-  });
-});
 
 /**
  * Errors cross this boundary as prose, and prose gets reworded. `code` is the part the popup and

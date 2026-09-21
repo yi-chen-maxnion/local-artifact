@@ -12,8 +12,8 @@
  *   commenting on a deployed build works at all is that the request leaves from here, with the
  *   extension's host permissions, rather than from the page.
  */
-// Spelled out again in extension/content.js and in the README's bookmarklet, neither of which can
-// import it; test/extension.test.mjs is what holds the three copies together.
+// Spelled out again in the README, which cannot import it either; test/extension.test.mjs is what
+// holds the two copies together.
 const BRIDGE = 'http://127.0.0.1:4517';
 
 /**
@@ -44,33 +44,26 @@ const originOf = (url) => {
   } catch { return null; }
 };
 
-/**
- * Who owns this origin, per the bridge. Cached briefly - this runs on every page load.
- *
- * `previewId` asks about one particular preview instead: the tab /preview opened knows which
- * session it belongs to, and only wants what goes with it. Cached under its own key, since the
- * answer is a different session's when two have opened this origin.
- */
-async function resolveOrigin(origin, previewId = null) {
-  const key = previewId ? `${origin}#${previewId}` : origin;
-  const hit = resolved.get(key);
+/** Who owns this origin, per the bridge. Cached briefly - this runs on every page load. */
+async function resolveOrigin(origin) {
+  const hit = resolved.get(origin);
   const ttl = hit?.value ? RESOLVE_TTL : RESOLVE_MISS_TTL;
   if (hit && Date.now() - hit.at < ttl) return hit.value;
   let value = null;
   try {
-    const q = previewId ? `&preview=${encodeURIComponent(previewId)}` : '';
-    const r = await fetch(`${BRIDGE}/resolve?origin=${encodeURIComponent(origin)}${q}`);
+    const r = await fetch(`${BRIDGE}/resolve?origin=${encodeURIComponent(origin)}`);
     if (r.ok) value = await r.json();
   } catch {}
-  resolved.set(key, { at: Date.now(), value });
+  resolved.set(origin, { at: Date.now(), value });
   return value;
 }
 
 /**
  * Put the overlay on a tab, if it belongs to a session.
  *
- * `#cc=` in the URL still wins: it is how one tab is pinned to a particular session while
- * several are running. Everything else is asked for.
+ * The origin is the whole of the question: nothing in the address bar says which session a tab
+ * belongs to, so every tab on an origin is bound the same way and a link that opens a second one
+ * is part of the loop like the first.
  */
 async function ensureBound(tabId, url) {
   await ready;
@@ -81,25 +74,15 @@ async function ensureBound(tabId, url) {
   // - where there is nothing of the user's to point at.
   if (origin === BRIDGE && !new URL(url).pathname.startsWith('/p/')) return null;
 
-  const fromHash = /[#&]cc=([a-f0-9]{8,})/.exec(url)?.[1] || null;
   let binding = bound.get(tabId);
-  if (!binding || binding.origin !== origin || (fromHash && binding.previewId !== fromHash)) {
-    // The hash still decides which session the tab belongs to; the lookup is only for the rest of
-    // the binding. It asks about that id in particular, because a tab pinned to one session on an
-    // origin another session has since opened would otherwise be labelled with the other's repo -
-    // and a tab opened by /preview, the one case the hash exists for, was labelled with nothing.
-    const answer = await resolveOrigin(origin, fromHash);
-    if (!fromHash && !answer) return null;
-    // A daemon from older code does not know `preview` and answers about the origin instead, which
-    // is the one answer that must not be believed here: it is the other session's, and this tab
-    // would be labelled with its repo until the next /preview replaces the daemon. An answer that
-    // is not about the id asked for is a miss, and a miss is what a pinned tab always got before.
-    const found = fromHash && answer?.previewId !== fromHash ? null : answer;
+  if (!binding || binding.origin !== origin) {
+    const found = await resolveOrigin(origin);
+    if (!found) return null;
     binding = {
-      previewId: fromHash || found.previewId,
-      repo: found?.repo || '',
+      previewId: found.previewId,
+      repo: found.repo || '',
       origin,
-      slack: found?.slack || null,
+      slack: found.slack || null,
     };
   } else {
     // Slack may have been connected - or dropped - since this tab was first bound, and the

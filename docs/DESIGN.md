@@ -21,9 +21,9 @@ deployed build was out of reach entirely. Now the extension's service worker ask
 
 Only the extension may ask. A request carrying a web `Origin` is refused outright and never gets
 CORS headers, and so is anything a browser marks as coming from a web context through
-`Sec-Fetch-Site` — an `<img>` pointed at the bridge, or a page the bridge itself serves. `#cc=`
-still works and still wins — it is how one tab is pinned to a particular session while several
-are running.
+`Sec-Fetch-Site` — an `<img>` pointed at the bridge, or a page the bridge itself serves. The
+token is gone entirely: there is nothing in a URL for the bridge to read, so every tab on an
+origin is bound the same way, and a URL pasted anywhere carries no routing of ours with it.
 
 With two or more sessions live, an unclaimed origin goes to whichever ran `/preview` most
 recently. An origin claimed *explicitly* — by a `POST /preview` naming it as a target — stays with
@@ -50,11 +50,9 @@ while the origin stayed off, reading as if the click had not stuck.
 
 **Storage is the one source of truth for both switches.** The menu only writes it. Each overlay
 reads it and follows its changes, so a switch flipped in one window reaches every tab; the service
-worker follows it too, to repaint badges and inject where a site came back on. Pages the bridge
-serves load their own overlay in the page world, which cannot read extension storage, so there the
-relay reads it and passes it on — as a message for an overlay already running, and as an attribute
-on `<html>` for one about to start. A page can forge either, which buys it nothing but hiding the
-overlay or its pins.
+worker follows it too, to repaint badges and inject where a site came back on. Every overlay runs
+in the extension's own world, the ones on bridge-served pages included, so every overlay reads
+that storage for itself and no page is ever asked to pass it on.
 
 **Pins outside comment mode are off by default**, for every site at once, and the menu turns them
 on. A faded marker beside every commented element is useful while reviewing and noise while simply
@@ -83,9 +81,10 @@ enough to try.
 - **The panel is a closed shadow root**, so a page cannot reach in through `host.shadowRoot`, fill
   in the textarea and click Send; and every control that sends or changes something ignores
   events that are not `isTrusted`.
-- **The relay only exists on pages the bridge serves**, and only carries `ping` and `capture`.
-  Those pages load the overlay with a `<script>` tag, so it runs in their world; their comments go
-  straight to the bridge, which is their own origin.
+- **There is no relay, and no way for a page to reach the worker.** Pages the bridge serves once
+  loaded the overlay with a `<script>` tag of their own and asked the extension through a
+  `postMessage` channel a content script carried; they are injected into like any other origin
+  now, so the channel — and everything on the page that could have used it — is gone.
 - **The bridge takes a comment from the extension and from nowhere else.** A pin's storage key
   carries its preview id, and the page can read its own `localStorage` — so posting that id
   straight to the bridge from the page is refused, whatever page it is. A request with no
@@ -138,13 +137,12 @@ where it is an ordinary extension fetch covered by host permissions. Measured on
 Local Network Access fully enforced: the worker reaches `http://127.0.0.1:4517` from a page on a
 public `https://` origin without a prompt. A cross-origin POST from there carries
 `Origin: chrome-extension://<id>` rather than the page's, which `/comment` accepts — a web page
-cannot forge that scheme. Bridge-served pages and the bookmarklet keep posting directly: they are
-loopback to loopback, which is unaffected.
+cannot forge that scheme.
 
-There is no falling back from one route to the other. An earlier version posted directly when the
-worker gave no answer — but a worker that timed out may still have delivered, and posting again
-sent the comment twice; and the bridge now refuses a direct post from an automatically bound page
-anyway.
+Every comment goes that way, a bridge-served page's included. There used to be a second route —
+the page posting to the bridge itself, loopback to loopback — with no falling back between them:
+a worker that timed out may still have delivered, and posting again sent the comment twice. The
+second route is gone, and the bridge refuses a direct post from any page at all.
 
 ## One preview id per origin, and per file
 
@@ -158,7 +156,7 @@ the state is loaded, so nothing already on a page is lost.
 were left on, so an origin-wide counter meant walking to a second route of the same app and
 finding one marker numbered `#6` with nothing before it — a number that referred to a page you
 were no longer looking at. A page is its path and query, the same key the markers are filed
-under; never the hash, which is where `#cc=` lives.
+under; never the hash, which is a route inside one page rather than a page of its own.
 
 The numbers also had to become durable: they live on the daemon, the markers live in the browser,
 and the two drift apart whenever a scratch directory is cleared or a daemon restarts. The counters
@@ -641,19 +639,16 @@ capture — waiting would keep the overlay hidden for the wait — and neither d
 (the tab not showing, say); for those, Send takes the frame the previous way, fading out and back.
 Captures are spaced 550ms apart so that fallback does not trip the limit itself. The fade is the
 manners; the `visibility` flip after it is the guarantee, since a tab that never paints would
-otherwise still be at full opacity when the shutter goes. And if nothing is going to be captured —
-no extension, no screenshot asked for — the overlay does not step aside at all. Without the
-extension the capture is a share-this-tab prompt, which stays at Send, behind its checkbox.
+otherwise still be at full opacity when the shutter goes.
 
 ## Screenshots
 
-With the extension installed the screenshot is silent, so it is simply always attached and there
-is no checkbox to tick. Without it, the only route is `getDisplayMedia`, which asks to share the
-tab — that stays opt-in behind a checkbox rather than ambushing you mid-comment, and the stream is
-stopped straight after each capture so Chrome's "sharing this tab" banner does not linger.
+The extension takes the frame and it does so silently, so the screenshot is simply always
+attached: there is no checkbox to tick and nothing to ask for. The panel's screenshot line says
+what happened rather than offering a choice.
 
-With the extension the frame is taken when the anchor is picked, not at Send — see *Nothing
-disappears between two frames*.
+The frame is taken when the anchor is picked, not at Send — see *Nothing disappears between two
+frames*.
 
 `chrome.tabs.captureVisibleTab` accepts only `<all_urls>` or `activeTab` as a host permission, and
 a specific host permission such as `http://127.0.0.1/*` is rejected; `activeTab` is granted solely
@@ -661,15 +656,15 @@ by clicking the toolbar icon, which does not fit a button that lives in the page
 was once the bug: with only specific host permissions, `captureVisibleTab` failed on every call,
 the overlay silently fell through to `getDisplayMedia`, and the result looked like a working
 feature that merely asked to share the tab each time. When a screenshot is missing the payload now
-carries a `capture` field saying whether the extension was even detected and what the capture
-error was, and the notification prints it, so a broken capture path explains itself.
+carries a `capture` field with the capture error in it, and the notification prints it, so a
+broken capture path explains itself.
 
-**With the extension present, `getDisplayMedia` is never used at all.** An earlier version fell
-through to it whenever the extension's capture failed, which meant a broken capture path showed up
-as a share-this-tab dialog on every single comment plus a permanent sharing banner — while looking
-like it was working. A failed capture now yields no screenshot, and the panel's own screenshot
-line turns red with the actual Chrome error attached — a standing fact about this page's capture
-path rather than a notice that flies past while you are typing.
+**`getDisplayMedia` is not a fallback; it is not there at all.** An earlier version fell through
+to it whenever the extension's capture failed, which meant a broken capture path showed up as a
+share-this-tab dialog on every single comment plus a permanent sharing banner — while looking like
+it was working. A failed capture now yields no screenshot, and the panel's own screenshot line
+turns red with the actual Chrome error attached — a standing fact about this page's capture path
+rather than a notice that flies past while you are typing.
 
 **Only the page that asked is ever photographed.** `captureVisibleTab` captures whichever tab is
 showing in the window, not the one that sent the message. Switch tabs in the moment between a pick
@@ -679,11 +674,10 @@ before and after the capture; if not, there is no screenshot, and the notificati
 was not the visible tab.
 
 Reloading the extension **orphans the scripts it injected into every page already open**: they
-keep running but their `chrome.runtime` link is dead. The overlay checks for that before every
-call, and on a bridge-served page the relay's ping round-trips to the service worker rather than
-being answered locally — answered locally, an orphaned page still reported a healthy extension and
-every screenshot silently timed out. **After reloading the extension, refresh any page you had
-open.**
+keep running but their `chrome.runtime` link is dead. The overlay checks `chrome.runtime.id`
+before every call rather than deciding once at start-up, so an orphaned page says *the extension
+was reloaded — refresh this page* instead of timing out silently. **After reloading the extension,
+refresh any page you had open.**
 
 ## Why targets are served through the bridge
 
@@ -785,11 +779,10 @@ person, which decides everything below.
 - **Only the extension may ask.** `/slack/destinations` and `/slack/share` use the same rule as
   `/resolve`: a web `Origin` is refused outright. The list of destinations names your channels and
   the people you talk to, and posting is done in your name — neither is something a page may ask
-  for. This is also why the button is offered only where the overlay runs in the isolated world.
-  On a page the bridge serves, the overlay shares a world with the page's own scripts, and the
-  relay in `content.js` deliberately carries `ping` and `capture` and nothing else. A local file
-  losing the Slack button is a smaller loss than every script on every page gaining the ability to
-  post as its reader.
+  for. The panel can offer the button because it runs in the extension's own world and asks the
+  worker itself — which is now true on every page, the ones the bridge serves included. It was not
+  always: those pages once loaded the overlay into their own world, where every script on the page
+  would have shared the line to the worker, so the button was withheld there.
 - **The detail is in the message, as a code block.** The message is the comment as a quote, the
   page, that block, and the screenshot.
 
@@ -813,9 +806,8 @@ person, which decides everything below.
   it — but a destination carried over from a comment several minutes ago is exactly the kind of
   thing that posts to the wrong room in someone's own name. Choosing from the list *is* sending,
   and the bridge orders it by what was used last, so the usual answer is the first row.
-- **What is left out.** The screenshot's local path, which means nothing on anyone else's machine,
-  and the `#cc=<previewId>` that `location.href` carries — a routing token for this bridge has no
-  business in a channel.
+- **What is left out.** The screenshot's local path, which means nothing on anyone else's machine.
+  The page URL goes in whole: there is no longer a routing token of ours in it to take off.
 - **The same detail Claude gets.** The code block is `detailLines`, the very lines that go into the
   notification. Two formatters would drift, and the person who pasted the stale one into their
   assistant would be the one to find out.

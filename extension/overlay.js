@@ -1,39 +1,32 @@
 /**
  * Local artifact comments - in-page toolbar.
  *
- * One file, two worlds. Injected by the extension it runs in the extension's isolated world:
- * it shares the DOM with the page but none of its JavaScript, so a script on the page can
- * neither read which session it is bound to nor send a comment through it. Served by the
- * bridge (or loaded by the bookmarklet) it runs in the page world, and reaches the extension -
- * when present - through the content-script relay.
+ * One file, one world. The extension injects it into its own isolated world - on every page it
+ * binds, the ones the bridge serves included - so it shares the DOM with the page but none of
+ * its JavaScript: a script on the page can neither read which session it is bound to nor send a
+ * comment through it.
  */
 (() => {
   // The global guards against a second injection into the same world; the host element against
-  // an overlay already running in the other one.
+  // an overlay left behind by an earlier injection that has not been cleaned up.
   if (window.__ccOverlay || document.getElementById('cc-overlay-host')) return;
   window.__ccOverlay = true;
 
+  /** Written into this world by the service worker, immediately before this file is injected. */
   const cfg = (() => {
-    const ds = document.currentScript?.dataset || {};
     const w = window.__ccConfig || {};
     return {
-      previewId: ds.ccPreview || w.previewId || null,
-      origin: ds.ccOrigin || w.origin || null,
+      previewId: w.previewId || null,
+      origin: w.origin || null,
       // Which session this page is talking to. It used to be implicit - you had just run
       // /preview on this exact URL - but the overlay now appears on any page the set-up session
       // owns, including a deployed build, so where a comment is going has to be legible.
-      repo: ds.ccRepo || w.repo || '',
-      /**
-       * Whether this browser has a Slack connection to post through, and whose name it posts
-       * under. Only ever set by the extension: the panel's Slack side asks the worker for
-       * everything, and in the page world - a bridge-served page, the bookmarklet - the page's
-       * own scripts share this world, so there is no telling them apart from the panel.
-       */
-      slack: (w.slack?.connected && !ds.ccPreview) ? w.slack : null,
+      repo: w.repo || '',
+      /** Whether this browser has a Slack connection to post through, and whose name it posts under. */
+      slack: w.slack?.connected ? w.slack : null,
     };
   })();
-  // Every loader - the extension, the bridge, the bookmarklet - sets both of these. Without
-  // either one there is no session to speak for and no bridge to reach, so draw nothing.
+  // Without either one there is no session to speak for and no bridge to reach, so draw nothing.
   if (!cfg.previewId || !cfg.origin) return;
 
   const MAX_HTML = 600;
@@ -42,19 +35,13 @@
   const PIN_KEY = `cc-pins-${cfg.previewId}`;
 
   // ---------------------------------------------------------------- extension bridge
+  /**
+   * Whether the line to the service worker is still there. Reloading the extension orphans this
+   * script: it keeps running with the id gone, so this is asked before every send, not once.
+   */
   const connected = () => { try { return Boolean(globalThis.chrome?.runtime?.id); } catch { return false; } };
-  /** In the extension's isolated world - decided once, since an orphaned script loses the id. */
-  const isolated = connected();
-  let extReady = null;
   const pending = new Map();
   let msgId = 0;
-
-  if (!isolated) {
-    window.addEventListener('message', (e) => {
-      if (e.source !== window || e.data?.__cc !== 'res') return;
-      pending.get(e.data.id)?.(e.data.payload);
-    });
-  }
 
   /**
    * Always resolves to an object carrying either the worker's answer or an `{ error, code }`:
@@ -66,10 +53,9 @@
       const id = ++msgId;
       /**
        * Every exit is this one, and it is where the promise above is kept. What arrives is not
-       * always the worker's: `respond()` with no argument and a port that closes both yield
-       * undefined, and in the page world the payload is whatever was posted at the window -
-       * including by the page itself, which shares that world. Anything that is not an object
-       * is not an answer, and callers read `.error` off whatever this resolves.
+       * always an answer: `respond()` with no argument and a port that closes both yield
+       * undefined. Anything that is not an object is not an answer, and callers read `.error`
+       * off whatever this resolves.
        */
       const finish = (v) => {
         if (!pending.delete(id)) return;
@@ -81,10 +67,6 @@
       setTimeout(() => finish({
         error: 'the extension did not answer - refresh this page', code: 'extension_timeout',
       }), timeout);
-      if (!isolated) {
-        window.postMessage({ __cc: 'req', id, type, payload }, '*');
-        return;
-      }
       // Reloading the extension orphans this script: it keeps running, its line to the worker gone.
       if (!connected()) return finish({ error: 'the extension was reloaded - refresh this page' });
       try {
@@ -100,40 +82,7 @@
     });
   }
 
-  /**
-   * In the isolated world the extension is there by definition, as long as it has not been
-   * reloaded. In the page world it is asked, with room for a service worker that has to wake up.
-   */
-  const hasExtension = async () => {
-    if (isolated) return connected();
-    if (extReady === null) extReady = Boolean((await askExtension('ping', {}, 2000))?.ok);
-    return extReady;
-  };
-
   // ---------------------------------------------------------------- screenshots
-  let displayStream = null;
-
-  async function captureViaDisplayMedia(rect) {
-    try {
-      if (!displayStream || !displayStream.active) {
-        displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { displaySurface: 'browser' }, audio: false, preferCurrentTab: true,
-        });
-      }
-      const track = displayStream.getVideoTracks()[0];
-      const out = await drawAndEncode(await new ImageCapture(track).grabFrame(), rect);
-      // Stop immediately: a retained stream leaves Chrome's "sharing this tab" banner up for
-      // the rest of the session, which is more alarming than re-asking on the next comment.
-      for (const t of displayStream.getTracks()) t.stop();
-      displayStream = null;
-      return out;
-    } catch {
-      for (const t of displayStream?.getTracks?.() || []) t.stop();
-      displayStream = null;
-      return null;
-    }
-  }
-
   /**
    * Widths are in OUTPUT pixels, not source pixels, so the ring is equally bold whatever the
    * capture was downscaled from. The white halo is what makes it read on a dark page; on a
@@ -150,8 +99,8 @@
 
   /**
    * Ring the anchor, cap the long edge at 1568px (what the vision encoder resizes to anyway).
-   * Both capture paths end here. Either frame is the viewport in device pixels, so its width
-   * over the viewport's is the scale from the anchor's CSS pixels.
+   * The frame is the viewport in device pixels, so its width over the viewport's is the scale
+   * from the anchor's CSS pixels.
    */
   async function drawAndEncode(bitmap, rect) {
     const long = Math.max(bitmap.width, bitmap.height);
@@ -226,22 +175,21 @@
       }
     }
     captureError = error || 'no response from the extension';
-    // Re-probe next time: the usual cause is the extension having been reloaded, and the
-    // cached "yes it is there" is exactly what would keep reporting a healthy extension.
-    extReady = null;
     // Said on the panel's own screenshot line rather than in a toast: it is a standing fact
     // about this page's capture path, not a one-off event to be caught as it flies past.
     markShot(captureError);
     return null;
   }
 
+  /**
+   * The only capture path there is, and it goes through the worker. There is no second one to
+   * fall through to: `getDisplayMedia` was that, and it ambushed the user with a share-this-tab
+   * dialog and a standing "sharing" banner every time the real capture failed. A failure here is
+   * a missing screenshot with the reason on the panel's own line - including the one failure the
+   * extension cannot fix for itself, this script orphaned by a reload, which `grabFrame` names.
+   */
   async function screenshot(rect) {
-    // With the extension installed this is the only capture path. Falling through to
-    // getDisplayMedia here would ambush the user with a share-this-tab dialog and leave a
-    // persistent "sharing" banner - a far worse outcome than simply having no screenshot.
-    if (await hasExtension()) return encodeFrame(await grabFrame(), rect);
-    if (state.wantShot) return await captureViaDisplayMedia(rect);
-    return null;
+    return encodeFrame(await grabFrame(), rect);
   }
 
   // ---------------------------------------------------------------- anchor description
@@ -755,9 +703,7 @@
     animation:spin .62s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
   .shot { display:flex; align-items:center; gap:5px; font-size:12px; color:#9b9ba6;
-    cursor:pointer; user-select:none; }
-  .shot.auto { cursor:default; }
-  .shot.auto input { display:none; }
+    user-select:none; }
   .shot.failed { color:#ff8f88; }
   .hint { margin-top:7px; font-size:12px; color:#8a8a95; }
   .pop.viewing .hint { margin-top:10px; }
@@ -871,7 +817,7 @@
     <div class="dlist"></div>
   </div>
   <div class="row">
-    <label class="shot"><input type="checkbox" class="shotbox"> <span class="shottext">screenshot</span></label>
+    <label class="shot"><span class="shottext">screenshot</span></label>
     <span class="sp"></span>
     <button class="btn outline slack" hidden>
       <svg viewBox="0 0 122 122" width="13" height="13" aria-hidden="true"><path fill="#E01E5A"
@@ -895,7 +841,7 @@
     pop: $('.pop'), what: $('.what'), quoted: $('.quoted'), ta: $('textarea'),
     send: $('.send'), close: $('.close'), del: $('.del'), grip: $('.grip'),
     hint: $('.hint'), pins: $('.pins'),
-    shotbox: $('.shotbox'), shotLabel: $('.shot'), shotText: $('.shottext'), said: $('.said'),
+    shotLabel: $('.shot'), shotText: $('.shottext'), said: $('.said'),
     slack: $('.slack'), dest: $('.dest'), destq: $('.destq'), dlist: $('.dlist'),
     status: $('.status'), lsbtn: $('.lsbtn'), badge: $('.badge'),
     side: $('.side'), sidePage: $('.side-page'), sideNote: $('.side-note'), sideClose: $('.side-close'),
@@ -906,11 +852,14 @@
    * `hlSource` is the locator of whatever is outlined - the element under the pointer, the anchor
    * being written about, or the pin being read back. All are the same record; see `locatorFor`.
    */
-  const state = { picking: false, anchor: null, drag: null, wantShot: false, busy: false,
+  const state = { picking: false, anchor: null, drag: null, busy: false,
                   hlSource: null, target: null, dwell: null, viewing: null,
                   word: null, fresh: null, popAt: null, listOpen: false, keepMode: false };
 
-  /** How a page is identified: path and query, never the hash - which is where `#cc=` lives. */
+  /**
+   * How a page is identified: path and query, never the hash - a hash route is a view of the
+   * same page as far as markers go, and the bridge numbers comments by this exact key.
+   */
   const pageKey = () => location.pathname + location.search;
 
   /** The origin was turned off from the toolbar menu while this page was open - see `setSwitchedOff`. */
@@ -927,29 +876,20 @@
   };
 
   /**
-   * With the extension the capture is silent, so it is simply always on and the checkbox
-   * would be noise. Without it the only route is getDisplayMedia, which prompts to share the
-   * tab on every send - that stays opt-in rather than ambushing the user mid-comment.
+   * The extension took the frame, so the capture is silent and simply always on: the line says
+   * what happened rather than asking for permission to happen.
+   *
+   * `err` null restores the normal line; a message pins the failure to it until it works.
    */
-  let shotAuto = false;
-
-  /** `err` null restores the normal line; a message pins the failure to it until it works. */
   function markShot(err) {
-    if (!shotAuto) return;
     el.shotLabel.classList.toggle('failed', Boolean(err));
     el.shotText.textContent = err ? 'no screenshot' : 'screenshot attached';
     el.shotLabel.title = err || 'Captured by the extension - no prompt';
   }
 
-  hasExtension().then((ok) => {
-    shotAuto = ok;
-    el.shotLabel.classList.toggle('auto', ok);
-    if (ok) markShot(captureError);
-    else el.shotLabel.title = 'No extension: each send asks to share the tab';
-  });
-  el.shotbox.addEventListener('change', () => { state.wantShot = el.shotbox.checked; });
+  markShot(captureError);
 
-  // Offered only where the panel can reach Slack without the page reaching it too - see `cfg.slack`.
+  // Shown only once the worker says there is a connection to post through - see `cfg.slack`.
   if (cfg.slack) {
     el.slack.hidden = false;
     el.slack.title = cfg.slack.user ? `Post this to Slack as ${cfg.slack.user}` : 'Post this to Slack';
@@ -1667,7 +1607,7 @@
     placePopover(anchor.rect);
     syncFab();
     el.ta.focus();
-    preShot = shotAuto ? preCapture(anchor) : null;
+    preShot = preCapture(anchor);
   }
 
   /**
@@ -1685,9 +1625,8 @@
    * it is what the pointer is on - a blink there would be the most visible blink of all - and the
    * red ring drawn into the frame lands on top of it.
    *
-   * Only with the extension: without it every capture is a share-this-tab prompt, which is asked
-   * for at Send. If this frame does not come back - two picks inside Chrome's two-a-second limit,
-   * the tab not showing - Send takes one the old way.
+   * If this frame does not come back - two picks inside Chrome's two-a-second limit, the tab not
+   * showing - Send takes one the old way, stepping the overlay aside there instead.
    */
   let preShot = null; // { anchor, promise } for the anchor being written about
   let asideHolds = 0; // overlapping picks each hold the overlay aside until their own frame is in
@@ -2003,17 +1942,14 @@
     // which is exactly how a dropped line in `askExtension` presented itself. The happy path is
     // the same expressions in the same order, and the first thing after them is still the veil.
     try {
-      const ext = await hasExtension();
       // The frame taken when this anchor was picked (see `preCapture`). With it, nothing on the page
       // has to step aside now: the panel closes and a pin appears, and that is all that moves.
       const pre = preShot?.anchor === anchor ? await preShot.promise : null;
       const early = Boolean(pre?.frame?.dataUrl);
-      // Without it, a frame is taken now, the overlay stepping out of it. Only if something is
-      // actually going to be captured - with no extension and no screenshot asked for there is
-      // nothing to hide from, and hiding anyway is a flicker that buys nothing.
-      capturing = !early && (ext || state.wantShot);
+      // Without it, a frame is taken now, the overlay stepping out of it.
+      capturing = !early;
       if (capturing) { await veil(true); await settlePaint(); }
-      // A wedged extension or a stalled share-tab prompt must never cost the comment.
+      // A wedged extension must never cost the comment.
       const shot = early ? await encodeFrame(pre.frame, pre.rect) : capturing ? await Promise.race([
         // Where the outline is now, not where the anchor was when picked - the page may have
         // scrolled while the comment was written.
@@ -2038,17 +1974,13 @@
         screenshot: shot,
         // Says why a screenshot is missing, so a broken capture path explains itself in the
         // notification instead of needing a round trip with the user.
-        capture: shot ? undefined : { extension: ext, error: captureError || undefined },
+        capture: shot ? undefined : { error: captureError || undefined },
       };
       /**
-       * Injected by the extension, the comment leaves from the service worker. A page on an
-       * https origin reaching http://127.0.0.1 is a local-network request, which Chrome gates
-       * behind a permission from version 142, and the bridge accepts an automatically bound
-       * origin's comments only from the extension anyway.
-       *
-       * In the page world - a page the bridge serves, or the bookmarklet - it is posted directly.
-       * There is no falling back from one to the other: a worker that timed out may still have
-       * delivered, and posting again would send the comment twice.
+       * The comment leaves from the service worker, never from here. A page on an https origin
+       * reaching http://127.0.0.1 is a local-network request, which Chrome gates behind a
+       * permission from version 142, and the bridge accepts a comment only from the extension
+       * anyway - whatever page it was left on.
        */
       let j;
       if (slack) {
@@ -2064,21 +1996,11 @@
         setStatus(`Sent to ${j.label || dest.label}`, true);
         return;
       }
-      if (isolated) {
-        j = await askExtension('comment', body, 20000);
-        // The worker answers a failure rather than throwing one, and `code` is the part of that
-        // answer which is not prose. Carried onto the error so the catch can read it instead of
-        // matching on a sentence the worker is free to reword.
-        if (j.error) throw Object.assign(new Error(j.error), { code: j.code, status: j.status });
-      } else {
-        const res = await fetch(`${cfg.origin}/comment`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        j = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(j.error || `bridge ${res.status}`);
-      }
+      j = await askExtension('comment', body, 20000);
+      // The worker answers a failure rather than throwing one, and `code` is the part of that
+      // answer which is not prose. Carried onto the error so the catch can read it instead of
+      // matching on a sentence the worker is free to reword.
+      if (j.error) throw Object.assign(new Error(j.error), { code: j.code, status: j.status });
       addPin(j.n, comment, anchor, loc);
       // Sending is not "I am done" - a review pass is several comments in a row.
       //
@@ -2089,13 +2011,9 @@
       if (capturing) await veil(false);
     } catch (e) {
       if (capturing) await veil(false);
-      // One condition, two paths. Where the worker sent the comment it says so in a code, having
-      // done the fetch on our behalf; where this page sent it itself - a page the bridge serves,
-      // or the bookmarklet - the fetch is ours and the browser reports an unreachable bridge and
-      // a refused cross-origin request with the same opaque "Failed to fetch". Neither is
-      // something to read a stack trace about - say the one thing that fixes it instead.
-      const offline = e.code === 'bridge_unreachable' || e.code === 'bridge_timeout'
-        || /failed to fetch|networkerror|load failed|fetch failed/i.test(e.message || '');
+      // The worker did the fetch on our behalf and says in a code how it went; a bridge that is
+      // not there is not something to read a stack trace about - say the one thing that fixes it.
+      const offline = e.code === 'bridge_unreachable' || e.code === 'bridge_timeout';
       // Named for the button that was pressed: a Slack share goes through the bridge too, and
       // "then Send" would point at the wrong one.
       setStatus(offline
@@ -2171,7 +2089,6 @@
    * the only moment it matters; the worker caches the answer, so this costs nothing per comment.
    */
   async function refreshSlack() {
-    if (!isolated) return;
     const s = await askExtension('slackStatus', {}, 6000);
     if (!s || s.error) return;
     cfg.slack = s.connected ? s : null;
@@ -2813,22 +2730,13 @@
 
   // Both settings live in the extension's storage, which is the one source of truth: the menu writes
   // it, and every overlay follows it, whichever tab the change was made from.
-  if (isolated) {
-    const read = () => chrome.storage.local.get(['off', 'idlePins']).then((v) => applySettings({
-      off: (v?.off || []).includes(location.origin), idlePins: v?.idlePins === true,
-    }), () => {});
-    try {
-      read();
-      chrome.storage.onChanged.addListener((c, area) => { if (area === 'local' && (c.off || c.idlePins)) read(); });
-    } catch {}
-  } else {
-    // Passed on by the relay on pages the bridge serves; see content.js.
-    window.addEventListener('message', (e) => {
-      if (e.source === window && e.data?.__cc === 'settings') applySettings(e.data.settings || {});
-    });
-    const d = document.documentElement.dataset;
-    if (d.ccSettings) try { applySettings(JSON.parse(d.ccSettings)); } catch {}
-  }
+  const readSettings = () => chrome.storage.local.get(['off', 'idlePins']).then((v) => applySettings({
+    off: (v?.off || []).includes(location.origin), idlePins: v?.idlePins === true,
+  }), () => {});
+  try {
+    readSettings();
+    chrome.storage.onChanged.addListener((c, area) => { if (area === 'local' && (c.off || c.idlePins)) readSettings(); });
+  } catch {}
 
   /**
    * Tests only - see test/overlay.test.mjs, which runs this exact file inside a DOM.
@@ -2837,19 +2745,23 @@
    * those failures is silent: the pin simply never comes back. They are also all closed over
    * inside this IIFE, so a test can only reach them if the file hands them out.
    *
-   * What it hands out is the rule: pure functions of what the caller passes in, each of which
-   * reads the page's own DOM and returns a selector, a string, a plain object, a Range, or the
-   * caller's own nodes back. Nothing here can send a comment, name the session, read the pins,
-   * reach the extension, or return a node inside the closed shadow root - because on a
-   * bridge-served page this script runs in the page world, where a hostile script can define
-   * `window.__ccTest` before the overlay loads and be handed whatever is on this list. So the
-   * list is exactly the set whose capability is "things the page could already do to itself",
-   * and `cfg`, `state`, `el`, `host`, `sr`, `pins` and `askExtension` are deliberately absent.
-   * Unused, it costs one `typeof`.
+   * This file now runs in the extension's isolated world and nowhere else, so the `__ccTest` a
+   * page defines is a different object in a different world and is never called: what is handed
+   * out here reaches the test harness, which loads this file into a bare DOM, and nobody else.
+   * That is what lets `askExtension` be on the list - the one thing here that can reach outside
+   * the page, and the one whose failure (a promise that never settles) wedges Send forever.
+   *
+   * IF A PAGE-WORLD LOADER IS EVER REINTRODUCED, TAKE `askExtension` OFF THIS LIST FIRST: in the
+   * page world a hostile script can define `window.__ccTest` before the overlay loads and be
+   * handed whatever is on it, and a line to the service worker is not something a page may have.
+   * Everything else is a pure function of what the caller passes in - it reads the page's own DOM
+   * and returns a selector, a string, a plain object, a Range, or the caller's own nodes back, so
+   * its capability is "things the page could already do to itself". `cfg`, `state`, `el`, `host`,
+   * `sr` and `pins` stay off it either way. Unused, it costs one `typeof`.
    */
   if (typeof window.__ccTest === 'function') {
     window.__ccTest({
-      brief, cssSelector, describe, distinctClass, domPath,
+      askExtension, brief, cssSelector, describe, distinctClass, domPath,
       elementsInRegion, findQuote, pageKey, selectorStep, unique,
     });
   }

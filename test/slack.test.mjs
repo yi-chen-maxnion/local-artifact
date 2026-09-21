@@ -194,7 +194,7 @@ describe('slack', () => {
         previewId,
         comment: 'make it blue',
         dest: { id: 'C1', kind: 'channel', label: '#design-review' },
-        page: { url: 'http://localhost:5173/a#cc=abcdef1234', title: 'Home' },
+        page: { url: 'http://localhost:5173/a#/route', title: 'Home' },
         anchor: { kind: 'element', selector: 'button.save', html: '<button class="save">Save</button>' },
         ...extra,
       },
@@ -412,9 +412,8 @@ describe('slack', () => {
 
       const text = post.params.initial_comment;
       assert.match(text, /^> make it blue\n/);
-      assert.match(text, /🔗 {2}<http:\/\/localhost:5173\/a>/);
+      assert.match(text, /🔗 {2}<http:\/\/localhost:5173\/a#\/route>/);
       assert.match(text, /```[\s\S]*selector {2}button\.save[\s\S]*```/);
-      assert.ok(!text.includes('cc=abcdef1234'), 'the preview token does not leave the machine');
       assert.ok(!text.includes(bridge.dir), 'nor does any path on this machine');
     });
 
