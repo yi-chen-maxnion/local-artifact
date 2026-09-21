@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Armed by the plugin host the first time /preview runs in a session (monitors/monitors.json).
+ * Armed by the plugin host the first time /connect runs in a session (monitors/monitors.json).
  * Every line it writes to stdout is delivered to the session as a <task_notification>.
  *
- * It deliberately does NOT start the bridge daemon - /preview does that. Until one is up it
+ * It deliberately does NOT start the bridge daemon - /connect does that. Until one is up it
  * costs one small process and a retry timer, nothing more.
  */
 import { execFileSync } from 'node:child_process';

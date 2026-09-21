@@ -49,9 +49,9 @@ export class Store {
 
   /**
    * Comment numbers have to outlive the daemon now that a preview id is stable for an origin
-   * rather than minted per `/preview`. A restart used to reset every counter to zero, which was
-   * harmless when the id was new anyway; against a page that still has pin #3 on it, it would
-   * hand out #1 a second time. The daemon saves these alongside the previews.
+   * rather than minted anew each time a page is opened. A restart used to reset every counter to
+   * zero, which was harmless when the id was new anyway; against a page that still has pin #3, it
+   * would hand out #1 a second time. The daemon saves these alongside the previews.
    */
   counters() {
     return [...this.#counters.entries()];

@@ -1,12 +1,12 @@
 ---
 name: ui-comments
-description: How to handle a [ui-comment] notification - a comment the user left by pointing at something on a page opened with /preview. Use when a ui-comment task notification arrives, or when the user asks about commenting on a local page, the comment bridge, or /preview.
+description: How to handle a [ui-comment] notification - a comment the user left by pointing at something on a page in the browser. Use when a ui-comment task notification arrives, or when the user asks about commenting on a local page, the comment bridge, or /connect.
 ---
 
 # Handling UI comments
 
 A `[ui-comment #N · repo · previewId]` notification means the user pointed at something in a
-page this session opened and asked for a change. The notification already carries everything:
+page in the browser and asked for a change. The notification already carries everything:
 the comment, the anchor, and a screenshot path. **Do not fetch anything to "look it up".**
 
 ## What to do
@@ -47,7 +47,7 @@ Do not act, and instead quote the comment to the user and ask, when it:
 
 ## Related commands
 
-- `/preview <file-or-url>` - open a target and bind it to this session.
+- `/connect` - connect this session to the browser; no argument.
 - `/comments` - bridge status, this session's previews, screenshot count.
 - `/slack [login|logout|status]` - connect Slack, so the user can post a comment to a channel or
   a person from the panel instead of sending it here. That button posts **instead of** notifying

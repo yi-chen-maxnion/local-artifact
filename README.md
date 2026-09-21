@@ -6,7 +6,7 @@ server, a generated `report.html`, a PDF — with no per-repo integration and no
 your stack.
 
 ```
-/preview                              →  this session now owns the browser
+/connect                              →  this session now owns the browser
 open http://localhost:5173 yourself   →  the page carries a 💬 button
 click 💬, point at a button, type     →  the session wakes up with the comment,
                                           the anchor, and a screenshot
@@ -56,14 +56,14 @@ own pages, but nothing can comment on them: what stops is everything the extensi
 
 | command | what it does |
 |---|---|
-| `/preview` | set this session up as the one the browser reports to; takes no argument, opens nothing, starts the bridge if needed |
+| `/connect` | set this session up as the one the browser reports to; takes no argument, opens nothing, starts the bridge if needed |
 | `/comments` | bridge status, which session owns the browser, bound origins, screenshot count |
 | `/slack [login\|logout\|status]` | connect Slack, so a comment can be posted to a channel or a person instead |
 
-**The session owns the browser, not a URL.** That is why `/preview` takes no target: run it once
+**The session owns the browser, not a URL.** That is why `/connect` takes no target: run it once
 and, with the extension installed, every page *you* open carries the comment button and reports
 back to that session — a second tab, another route or port, a deployed `https://` build. With
-several sessions live, a page goes to whichever ran `/preview` most recently. The button's
+several sessions live, a page goes to whichever ran `/connect` most recently. The button's
 tooltip and the panel name the repo a comment goes to.
 Clicking the extension's toolbar icon opens a menu with two switches:
 
@@ -196,14 +196,14 @@ page (overlay.js)                    bridge daemon 127.0.0.1:4517           clau
                                                         (as you, with your own token)
 ```
 
-- **`/preview` claims the browser for this session**, and each origin it then resolves gets a
+- **`/connect` claims the browser for this session**, and each origin it then resolves gets a
   `previewId` — one per origin, one per file, reused so the pins already on a page are kept. That
   id is the routing key: comments from that page reach this session and no other. Two sessions in
   two repos never cross-talk.
-- **The session key is the `claude` ancestor PID**, which the monitor and `/preview` both derive,
+- **The session key is the `claude` ancestor PID**, which the monitor and `/connect` both derive,
   so they always agree.
 - **The monitor is declared, not asked for**: `monitors/monitors.json` arms it the first time
-  `/preview` runs in a session, and each line it prints becomes a notification carrying the whole
+  `/connect` runs in a session, and each line it prints becomes a notification carrying the whole
   comment. Only the screenshot is a path.
 - **State survives a daemon restart** — previews, comment numbers and the event sequence are saved
   to `$TMPDIR/claude-ui-comments/previews-<port>.json` — and a monitor reconnects on its own.
@@ -216,17 +216,17 @@ page (overlay.js)                    bridge daemon 127.0.0.1:4517           clau
 | `spec.pdf`, `.png`, `.md`, `.txt` | bridge serves a wrapper page holding the overlay | no |
 | `http://localhost:5173/…`, a deployed build | the extension injects it | yes |
 
-The bridge still serves the first two rows, but since `/preview` takes no target there is no
+The bridge still serves the first two rows, but since `/connect` takes no target there is no
 command that hands it a file: the extension's row is the one you get.
 
 ## When a comment does not arrive
 
 - **The panel says the bridge is not answering.** The Claude session that owned it ended and the
-  daemon idle-exited five minutes later. Run `/preview` again in a session, then Send — the comment
+  daemon idle-exited five minutes later. Run `/connect` again in a session, then Send — the comment
   is still in the box.
-- **`/preview` says the monitor is NOT ATTACHED.** The monitor did not arm: restart the session,
-  and check that the `when` trigger in `monitors/monitors.json` is `on-skill-invoke:local-artifact:preview`.
-- **`/preview` could not find the claude process.** Comments are routed by the id of the `claude`
+- **`/connect` says the monitor is NOT ATTACHED.** The monitor did not arm: restart the session,
+  and check that the `when` trigger in `monitors/monitors.json` is `on-skill-invoke:local-artifact:connect`.
+- **`/connect` could not find the claude process.** Comments are routed by the id of the `claude`
   process above the script; nothing can be routed without one.
 - **The screenshot is missing.** The notification's `shot` line says why — no extension on the
   page, the page was not the visible tab when the shot was taken (only that tab is ever
@@ -234,7 +234,7 @@ command that hands it a file: the extension's row is the one you get.
 - **Can't point at part of a PDF or an iframe.** In comment mode these ignore the pointer so a
   drag over them becomes a region; leave comment mode to scroll them.
 - **No button on a page.** The origin may be turned off (the toolbar badge says `off`; the toolbar menu turns it back on), or no
-  session has run `/preview` yet.
+  session has run `/connect` yet.
 
 `/comments` shows the bridge, the session that owns the browser, and whether this session's
 monitor is connected.
@@ -246,11 +246,11 @@ monitor is connected.
 monitors/         the auto-armed monitor declaration
 lib/              common.mjs (session key, ports, token, bridge client), format.mjs (notification text)
 bridge/           server, static serving + HTML injection, PDF/image/md/text wrapper, scratch store, slack.mjs
-scripts/          monitor.mjs (session side), preview.mjs, ctl.mjs
+scripts/          monitor.mjs (session side), connect.mjs, ctl.mjs
 slack-app.json    the client id of the Slack app comments are posted through (not a secret)
 extension/        MV3 extension, overlay.js and console-hook.js (also served by the bridge), popup (toolbar menu)
 skills/           what Claude does with a comment
-commands/         /preview, /comments, /slack
+commands/         /connect, /comments, /slack
 fixtures/         pages for checking the overlay by hand
 test/             node --test suites for the bridge and the notification format
 docs/             DESIGN.md
@@ -311,7 +311,7 @@ npm run installed-path  # where the cache copy lives
 ```
 
 The tests start their own daemon on a free port with a private `TMPDIR`, so they never touch a
-bridge in use. A daemon left running from older code is replaced the next time `/preview` runs.
+bridge in use. A daemon left running from older code is replaced the next time `/connect` runs.
 
 ### Dependencies
 

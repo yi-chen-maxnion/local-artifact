@@ -2,7 +2,7 @@
   {
     "name": "ui-comments",
     "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/monitor.mjs\"",
-    "description": "Comments from pages this session opened in the browser",
-    "when": "on-skill-invoke:local-artifact:preview"
+    "description": "Comments from any page, for the session connected to the browser",
+    "when": "on-skill-invoke:local-artifact:connect"
   }
 ]

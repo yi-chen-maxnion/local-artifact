@@ -18,7 +18,7 @@ const GRACE = 3000;
 
 /**
  * The monitor's session key is the pid of the nearest `claude` process above it - derived, never
- * passed, because the daemon derives the same thing from `/preview` and the two have to agree.
+ * passed, because the daemon derives the same thing from `/connect` and the two have to agree.
  * A test therefore cannot spawn scripts/monitor.mjs on its own and be routed anything.
  *
  * So it is given a real ancestor rather than an env override of the one value both sides work out

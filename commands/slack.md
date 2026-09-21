@@ -31,7 +31,7 @@ Known failures and what fixes them:
   one-time setup.
 - `this login link has expired` — the browser was left sitting on the Slack page for more than
   ten minutes. Run `/slack login` again.
-- `bridge not running` — run `/preview <file-or-url>` first; the Slack connection lives in the
+- `bridge not running` — run `/connect` first; the Slack connection lives in the
   same daemon.
 
 Posting itself is done by the user from the comment panel, not from here: the **Slack** button

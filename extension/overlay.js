@@ -18,9 +18,9 @@
     return {
       previewId: w.previewId || null,
       origin: w.origin || null,
-      // Which session this page is talking to. It used to be implicit - you had just run
-      // /preview on this exact URL - but the overlay now appears on any page the set-up session
-      // owns, including a deployed build, so where a comment is going has to be legible.
+      // Which session this page is talking to. It used to be implicit - you had just named this
+      // exact URL - but the overlay now appears on any page the connected session owns,
+      // including a deployed build, so where a comment is going has to be legible.
       repo: w.repo || '',
       /** Whether this browser has a Slack connection to post through, and whose name it posts under. */
       slack: w.slack?.connected ? w.slack : null,
@@ -2017,7 +2017,7 @@
       // Named for the button that was pressed: a Slack share goes through the bridge too, and
       // "then Send" would point at the wrong one.
       setStatus(offline
-        ? `The bridge is not answering - run /preview again in the session, then ${slack ? 'Slack' : 'Send'}.`
+        ? `The bridge is not answering - run /connect again in the session, then ${slack ? 'Slack' : 'Send'}.`
         : `Not sent - ${e.message}`);
     } finally {
       host.style.visibility = '';

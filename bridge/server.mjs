@@ -22,14 +22,14 @@ const IDLE_EXIT_MS = 5 * 60 * 1000;
 const INSTANCE = shortId(6);
 
 /**
- * What separates this machine's own callers - preview, ctl, the monitor - from a web page.
+ * What separates this machine's own callers - connect, ctl, the monitor - from a web page.
  * A page in the browser can reach this port, and a plain `text/plain` POST from one is sent
  * without any CORS preflight; what it cannot do is read a 0600 file. So the routes that
  * register sessions, open files and stream comments require this token, which is written to
  * TOKEN_FILE once the port is ours.
  */
 const TOKEN = shortId(16);
-const CONTROL = new Set(['/register', '/preview', '/claim', '/events']);
+const CONTROL = new Set(['/register', '/preview', '/connect', '/events']);
 const BUILD = codeBuild(ROOT);
 
 /**
@@ -77,9 +77,9 @@ const commentRate = new Map(); // sessionKey -> limiter, dropped with the sessio
 /**
  * Which session an otherwise unbound page belongs to.
  *
- * The binding used to live in the address bar: `/preview` minted a token, put it in the URL,
+ * The binding used to live in the address bar: setup minted a token, put it in the URL,
  * and a tab without it was simply not part of the loop - which meant a second tab on the same
- * app, or a link that opened one, was dead. The session owns the browser instead: `/preview` is
+ * app, or a link that opened one, was dead. The session owns the browser instead: `/connect` is
  * setup, and every page the extension can reach asks who it belongs to.
  *
  * Most recent setup wins. With one session - the normal case - there is nothing to decide; with
@@ -269,7 +269,7 @@ function pruneSessions() {
  * Is anything going to read this?
  *
  * A comment is written into a replay buffer and pushed to whatever monitors are streaming. With
- * no monitor - a session where `/preview` was never run, one whose monitor never armed, one that
+ * no monitor - a session where `/connect` was never run, one whose monitor never armed, one that
  * has been closed - the buffer is where the comment stops, and the page was being told it had
  * been delivered. A comment nobody receives is a failure and has to read as one, while it is
  * still on screen and can be sent somewhere else.
@@ -342,11 +342,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     /**
-     * Setup with nothing to open: `/preview` without a target. With the extension installed that
-     * is all most sessions need, since every page already carries the button and only has to be
-     * told whose session it reports to.
+     * Setup with nothing to open: `/connect`, which names no target. With the extension installed
+     * that is all most sessions need, since every page already carries the button and only has to
+     * be told whose session it reports to.
      */
-    if (p === '/claim' && req.method === 'POST') {
+    if (p === '/connect' && req.method === 'POST') {
       const b = await readBody(req);
       if (!sessions.has(b.key)) return json(res, 409, { error: 'session not registered' });
       claimBrowser(b.key);
@@ -411,7 +411,7 @@ const server = http.createServer(async (req, res) => {
       if (!found) {
         return json(res, 404, {
           error: 'no session is set up',
-          hint: 'run /preview in the Claude session that should receive comments',
+          hint: 'run /connect in the Claude session that should receive comments',
         });
       }
       if (found.created) saveState();
@@ -583,7 +583,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (!listening(pv.sessionKey)) {
         return json(res, 409, {
-          error: 'no Claude session is listening - run /preview in the session that should receive comments',
+          error: 'no Claude session is listening - run /connect in the session that should receive comments',
         });
       }
       const text = String(b.comment || '').slice(0, 8000).trim();

@@ -94,8 +94,8 @@ export async function register(bridge, key = `p${process.pid}`, pid = process.pi
 }
 
 /** The setup gesture with no target: `key` owns the browser from now on. */
-export async function claim(bridge, key) {
-  const res = await bridge.request('/claim', { json: { key } });
+export async function connect(bridge, key) {
+  const res = await bridge.request('/connect', { json: { key } });
   assert.equal(res.status, 200);
   return res.json();
 }

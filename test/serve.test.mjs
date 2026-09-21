@@ -22,7 +22,7 @@ test('markdown keeps ordinary links and drops script ones', () => {
 
 /**
  * The wrapper page shares its origin with the bridge's own API, so a link in a note that a
- * browser would run as script is script running next to /comment, /preview and the token that
+ * browser would run as script is script running next to /comment, /connect and the token that
  * guards them. `safeHref` in bridge/wrapper.mjs is the only thing standing there, and it is
  * reached through `wrapperPage` - it is not exported. A refused link keeps its text and loses
  * its anchor, so "no <a" is the whole assertion.

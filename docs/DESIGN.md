@@ -6,14 +6,14 @@ change does not quietly reintroduce a problem that was already solved once.
 
 ## Which pages get the button
 
-**The session owns the browser, not a URL.** Run `/preview` once — that is the setup gesture, and
+**The session owns the browser, not a URL.** Run `/connect` once — that is the setup gesture, and
 it is why the command takes no target at all: naming one URL is not what binds anything, and a URL
 the user could open themselves was an argument they had no reason to type. From then on every page
 they open carries the comment button and reports back to that session:
 a second tab, a link that opened one, a different route, a different port, and a deployed build
 at `https://…` as much as `http://localhost:5173`. Nothing has to be in the address bar.
 
-It used to be the other way round. `/preview` minted a token, put it in the URL as `#cc=…`, and
+It used to be the other way round. `/connect` minted a token, put it in the URL as `#cc=…`, and
 the extension read it at `document_start` and cached it in `sessionStorage` for that tab's life.
 So the binding was a *tab*: open the same app in a new tab and there was no overlay at all, and a
 deployed build was out of reach entirely. Now the extension's service worker asks the bridge
@@ -25,13 +25,13 @@ CORS headers, and so is anything a browser marks as coming from a web context th
 token is gone entirely: there is nothing in a URL for the bridge to read, so every tab on an
 origin is bound the same way, and a URL pasted anywhere carries no routing of ours with it.
 
-With two or more sessions live, an unclaimed origin goes to whichever ran `/preview` most
+With two or more sessions live, an unclaimed origin goes to whichever ran `/connect` most
 recently. An origin claimed *explicitly* — by a `POST /preview` naming it as a target — stays with
 the session that claimed it, and where two sessions have claimed the same origin the later claim
 wins, for the same reason: the most recent setup gesture is the one the user just made. It reverts
 to the earlier session if the later one ends, since that session claimed the origin explicitly
-too. Nothing in the CLI sends such a claim today — `/preview` posts to `/claim`, which names no
-origin — so in practice every origin is unclaimed and follows the most recent setup.
+too. Nothing in the CLI sends such a claim today — the `/connect` command posts to `POST /connect`,
+which names no origin — so in practice every origin is unclaimed and follows the most recent setup.
 When the session that owns the browser ends, it passes to the session that registered most
 recently. The corner button's tooltip and the compose panel both name the repo they are sending
 to, so this is visible rather than guessed, and `/comments` prints it.
@@ -109,7 +109,7 @@ A page in the browser can reach `127.0.0.1:4517`, and a `POST` with a `text/plai
 without any CORS preflight — the page cannot read the answer, but whatever the request does, it
 does. The routes that register sessions, open files and stream comments therefore require a
 **control token**: the daemon writes it to `$TMPDIR/claude-ui-comments/token-<port>` (mode 0600)
-once the port is its own, and `preview`, `ctl` and the monitor send it. A web page cannot read the
+once the port is its own, and `connect`, `ctl` and the monitor send it. A web page cannot read the
 file. Without the token `/health` says only that the bridge is up. Every `POST` must also be
 `application/json`, which a cross-origin page cannot send without a preflight this server never
 grants outside `/comment`.
@@ -147,8 +147,8 @@ second route is gone, and the bridge refuses a direct post from any page at all.
 ## One preview id per origin, and per file
 
 The id a page's markers are stored under (`cc-pins-<previewId>` in `localStorage`) used to be
-minted fresh on every `/preview`, which meant running it twice on the same app silently orphaned
-every pin. Ids are now created once per (session, origin) — and per (session, file) for the pages
+minted fresh every time a target was opened, which meant opening the same app twice silently
+orphaned every pin. Ids are now created once per (session, origin) — and per (session, file) for the pages
 the bridge serves — and reused. Ids from the older, per-target format are given their origin when
 the state is loaded, so nothing already on a page is lost.
 
@@ -697,11 +697,11 @@ Anything that is not a page, a PDF, markdown or an image is shown as plain text.
   reaches Bash tool calls but is not guaranteed to reach a plugin monitor, and both sides must
   agree or comments route nowhere. The process table is read with a single `ps`, and both the
   native `claude` binary and `node …/claude` from an npm install are recognised. When no `claude`
-  process is found, `/preview` says so and stops, since nothing could be routed.
+  process is found, `/connect` says so and stops, since nothing could be routed.
 - **The monitor is declared, not asked for, and only arms when you use the plugin.**
-  `monitors/monitors.json` uses `when: "on-skill-invoke:local-artifact:preview"`, so the host starts
-  it the first time `/preview` runs in a session — not in every session you happen to open. Each
-  stdout line becomes a `<task_notification>`. `/preview` checks that the monitor actually attached
+  `monitors/monitors.json` uses `when: "on-skill-invoke:local-artifact:connect"`, so the host starts
+  it the first time `/connect` runs in a session — not in every session you happen to open. Each
+  stdout line becomes a `<task_notification>`. `/connect` checks that the monitor actually attached
   and says so, because a mis-matched arm trigger would otherwise fail silently.
 - **The whole payload is in the notification.** Claude does not fetch anything to read a comment.
   Only the screenshot is a path, because a notification is text.
@@ -724,7 +724,7 @@ Anything that is not a page, a PDF, markdown or an image is shown as plain text.
   it and a reconnecting monitor would treat replayed events as already-seen and silently drop them.
 - **A daemon from older code is replaced.** It would serve its own routes and its own overlay,
   and fail in ways that look like the new code being broken. `/health` reports where the daemon
-  was started from and a fingerprint of its code; `/preview` compares both with its own and
+  was started from and a fingerprint of its code; `/connect` compares both with its own and
   restarts the daemon when they differ.
 - **More than 30 comments a minute from one session are refused**, by the daemon, with a `429` the
   panel prints under the comment — the text stays in the box and can be sent again in a moment.
@@ -821,14 +821,14 @@ The bridge writes a comment into a replay buffer and pushes it to whatever monit
 for that session. That buffer is what makes a monitor which drops and reconnects — a daemon
 restart, a laptop waking — lose nothing. It also meant that a session with **no** monitor at all
 was indistinguishable from one that was merely away: the comment went into the buffer, the page
-was told it had been delivered, and nothing ever read it. A session where `/preview` was never
+was told it had been delivered, and nothing ever read it. A session where `/connect` was never
 run, or whose monitor never armed, swallowed comments while reporting success.
 
 So `/comment` now asks whether anything is listening before it accepts. A stream open for that
 session is the answer; otherwise the last time one was open has to be within a minute — long
 enough to cover a reconnect, short enough that an unattended session is refused. A daemon that
 has only just started counts as inside the window, since its monitors are reconnecting right then.
-The page gets a 409 saying to run `/preview`, with the comment still in the panel and the Slack
+The page gets a 409 saying to run `/connect`, with the comment still in the panel and the Slack
 button still there to send it somewhere else.
 
 ## When a comment does not arrive
@@ -886,7 +886,7 @@ the gap.
 
 **"Everything after 0" then has to be expressible, and `since=0` cannot say it.** Its meaning was
 not changed, because a monitor is not upgraded when the daemon is: the daemon is replaced on the
-next `/preview`, while a monitor lives as long as its session — days, against a daemon that is
+next `/connect`, while a monitor lives as long as its session — days, against a daemon that is
 minutes old. An old monitor sends `since=0` on every fresh start and must keep getting nothing; if
 0 had been redefined, its first reconnect after the upgrade would replay fifty comments its
 predecessor had already printed into the session. `/events` therefore answers a second parameter,
@@ -916,7 +916,7 @@ change.
 The daemon itself survives sleep — it idle-exits only when no registered session's process is
 still alive, and sleeping does not end a process. What does kill it is the Claude session ending:
 five minutes later the daemon exits, and an old preview tab then has nothing to talk to. The page
-says so and names the fix (`/preview` again) rather than reporting a transport error, and the
+says so and names the fix (`/connect` again) rather than reporting a transport error, and the
 comment stays in the box to be sent once it is back. The extension's page-load lookups do not
 count as activity, so browsing does not keep an unused daemon alive.
 
@@ -934,7 +934,7 @@ instead ask Claude to run the script with Bash, which goes through the normal pe
 Note that the monitor still arms on dispatch even when the command body fails, because arming
 keys off the skill invocation, not off the command succeeding.
 
-> **The arm trigger must use the plugin-namespaced skill name** (`local-artifact:preview`, not
-> `preview`). The host compares it with exact string equality against the name it emits, which is
+> **The arm trigger must use the plugin-namespaced skill name** (`local-artifact:connect`, not
+> `connect`). The host compares it with exact string equality against the name it emits, which is
 > `<plugin>:<skill>` for plugin skills — a bare name silently matches nothing and no monitor is
 > ever started. Rename the plugin and this string has to change with it.

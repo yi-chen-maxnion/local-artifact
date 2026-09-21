@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, claim, comment, freePort, listen, preview, register, resolveOrigin, startBridge } from './helpers.mjs';
+import { ROOT, comment, connect, freePort, listen, preview, register, resolveOrigin, startBridge } from './helpers.mjs';
 
 describe('bridge', () => {
   let bridge;
@@ -19,7 +19,7 @@ describe('bridge', () => {
 
   describe('control routes', () => {
     test('refuse a caller without the token', async () => {
-      for (const route of ['/register', '/preview', '/claim']) {
+      for (const route of ['/register', '/preview', '/connect']) {
         const res = await bridge.request(route, { json: { key, pid: process.pid }, token: null });
         assert.equal(res.status, 401, route);
       }
@@ -80,16 +80,16 @@ describe('bridge', () => {
     });
   });
 
-  describe('/claim', () => {
+  describe('/connect', () => {
     // The claim says which session the browser reports to, so a key with no session behind it
     // would point every page at nothing - refused rather than remembered for later.
     test('refuses a session that never registered', async () => {
-      const res = await bridge.request('/claim', { json: { key: `p${process.pid}9` } });
+      const res = await bridge.request('/connect', { json: { key: `p${process.pid}9` } });
       assert.equal(res.status, 409);
     });
 
     test('names the session it made primary', async () => {
-      assert.deepEqual(await claim(bridge, key), { ok: true, primary: key });
+      assert.deepEqual(await connect(bridge, key), { ok: true, primary: key });
     });
   });
 
@@ -237,8 +237,8 @@ test('previews, counters and seq survive a daemon restart', async () => {
 });
 
 /**
- * Two sessions, one dev server. Both ran /preview on it, so both claims are explicit and the
- * tie-break is the one the user can see: the most recent setup gesture owns the browser.
+ * Two sessions, one dev server. Both opened it by name (`POST /preview`), so both claims are
+ * explicit and the tie-break is the one the user can see: the most recent gesture owns the browser.
  */
 describe('an origin two sessions have opened', () => {
   const site = 'http://localhost:5199';
@@ -255,7 +255,7 @@ describe('an origin two sessions have opened', () => {
   after(() => bridge.stop());
 
   // Claims are ordered by the millisecond they were made, so two of them need different ones.
-  // Named for what it is - an explicit open - since the setup gesture with no target is `claim`.
+  // Named for what it is - an explicit open - since the setup gesture with no target is `connect`.
   const openedBy = async (key) => {
     await new Promise((r) => setTimeout(r, 2));
     return (await preview(bridge, key, `${site}/`)).previewId;
@@ -280,8 +280,8 @@ describe('an origin two sessions have opened', () => {
 });
 
 /**
- * An origin nobody ever opened - every origin, now that `/preview` names none. It follows the
- * session that set up last, which is the whole of what "any page you open" means.
+ * An origin nobody ever opened - every origin, now that `/connect` names none. It follows the
+ * session that connected last, which is the whole of what "any page you open" means.
  */
 describe('an origin no session has opened', () => {
   const site = 'http://localhost:5299';
@@ -309,10 +309,10 @@ describe('an origin no session has opened', () => {
   };
 
   test('follows the session that claimed the browser last, and outlives the one before it', async () => {
-    await claim(bridge, keyA);
+    await connect(bridge, keyA);
     const a = await resolved();
 
-    await claim(bridge, keyB);
+    await connect(bridge, keyB);
     const b = await resolved();
     assert.notEqual(a, b); // one preview per (session, origin), so this is B's own
 
@@ -330,8 +330,8 @@ describe('an origin no session has opened', () => {
  * given one: node under the name `claude`, the trick test/monitor.test.mjs uses for the same
  * reason - `ps` prints the name a process was started under, which is all findClaudePid reads.
  */
-describe('scripts/preview.mjs', () => {
-  const SCRIPT = path.join(ROOT, 'scripts', 'preview.mjs');
+describe('scripts/connect.mjs', () => {
+  const SCRIPT = path.join(ROOT, 'scripts', 'connect.mjs');
   let bridge;
 
   before(async () => { bridge = await startBridge(); });
@@ -367,7 +367,7 @@ describe('scripts/preview.mjs', () => {
     const { code, out, err, pid } = await run(named, [SCRIPT], bridge.port, { monitor: true });
     assert.equal(err, '');
     assert.equal(code, 0);
-    assert.match(out, new RegExp(`^setup {4}session p${pid} \\(`));
+    assert.match(out, new RegExp(`^connect {2}session p${pid} \\(`));
     assert.match(out, /\n {2}monitor listening\n$/); // the line the slash command reads back
     // From the state on disk, not /health: the script's own process is the session, and asking
     // /health after it has exited prunes the very session whose claim is being checked.
@@ -381,7 +381,7 @@ describe('scripts/preview.mjs', () => {
     const port = await freePort();
     const { code, err } = await run(process.execPath, [SCRIPT, './report.html'], port);
     assert.equal(code, 2);
-    assert.match(err, /^preview: takes no argument/);
+    assert.match(err, /^connect: \/connect takes no argument/);
     await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
   });
 });

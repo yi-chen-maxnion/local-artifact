@@ -164,7 +164,7 @@ async function paintBadge(tabId, origin) {
           ? `Comments off for ${origin}`
           : b || origin === BRIDGE
             ? `Commenting into ${b?.repo || 'the set-up session'}`
-            : 'No Claude session is set up - run /preview in one',
+            : 'No Claude session is set up - run /connect in one',
       }),
     ]);
   } catch {}
@@ -206,7 +206,7 @@ async function call(route, { body, timeout = 25000 } = {}) {
      */
     return e?.name === 'TimeoutError'
       ? { error: 'the bridge did not answer in time', code: 'bridge_timeout' }
-      : { error: 'the bridge is not answering - run /preview again in the session', code: 'bridge_unreachable' };
+      : { error: 'the bridge is not answering - run /connect again in the session', code: 'bridge_unreachable' };
   }
   const j = await r.json().catch(() => ({}));
   if (r.ok) return j;

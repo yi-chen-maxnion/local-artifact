@@ -24,7 +24,7 @@ function slackLine(s) {
 async function slackCommand(sub) {
   if (sub === 'status') {
     const h = await health();
-    if (!h?.ok) return console.log(`bridge     not running (${ORIGIN}) - run /preview first`);
+    if (!h?.ok) return console.log(`bridge     not running (${ORIGIN}) - run /connect first`);
     return console.log(slackLine(h.slack));
   }
 
@@ -73,7 +73,7 @@ try {
 } catch {
   console.log(`bridge     not running (${ORIGIN})`);
   console.log(`session    ${session.key || '(no claude process found)'}  ${session.repo}`);
-  console.log('Run /preview <file-or-url> to start it.');
+  console.log('Run /connect to start it.');
   process.exit(0);
 }
 
@@ -95,12 +95,12 @@ if (!h.sessions) {
   // two it is the only thing that answers "where did that comment just go?".
   const primary = h.sessions.find((s) => s.key === h.primary);
   console.log(`browser    ${h.primary
-    ? (h.primary === session.key ? 'this session' : `${primary?.repo || h.primary} - run /preview here to take it over`)
-    : 'not set up - run /preview'}`);
+    ? (h.primary === session.key ? 'this session' : `${primary?.repo || h.primary} - run /connect here to take it over`)
+    : 'not connected - run /connect'}`);
   const origins = mine.filter((p) => p.origin);
   if (origins.length) {
     console.log(`origins    ${origins.length} bound to this session:`);
-    for (const p of origins) console.log(`  ${p.id.slice(0, 6)}  ${p.origin}${p.claimed ? '  (opened with /preview)' : ''}`);
+    for (const p of origins) console.log(`  ${p.id.slice(0, 6)}  ${p.origin}`);
   }
   const files = mine.filter((p) => !p.origin);
   console.log(`previews   ${files.length} for this session${files.length ? ':' : ''}`);
