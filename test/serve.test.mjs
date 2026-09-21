@@ -85,8 +85,10 @@ describe('a markdown link that a browser would run as script', () => {
 
 test('kindOf', () => {
   assert.equal(kindOf('a.HTML'), 'html');
-  assert.equal(kindOf('a.pdf'), 'pdf');
   assert.equal(kindOf('a.markdown'), 'markdown');
   assert.equal(kindOf('a.svg'), 'image');
   assert.equal(kindOf('a.json'), 'text');
+  // Not a kind of its own any more: /open refuses one outright, and anything that reached the
+  // wrapper would be shown as the text of a binary file rather than as a document.
+  assert.equal(kindOf('a.pdf'), 'text');
 });

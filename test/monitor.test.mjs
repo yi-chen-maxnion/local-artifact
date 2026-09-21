@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { comment, preview, startBridge } from './helpers.mjs';
+import { comment, originId, startBridge } from './helpers.mjs';
 
 const ROOT = path.resolve(fileURLToPath(import.meta.url), '../..');
 const MONITOR = path.join(ROOT, 'scripts', 'monitor.mjs');
@@ -118,7 +118,7 @@ describe('the monitor process', () => {
   test('delivers the first comment of a session to a monitor that replaced the one it was sent to', async () => {
     await start();
     // Only possible once the monitor has registered the session, which it does before it streams.
-    ({ previewId } = await preview(bridge, key, 'http://localhost:7600/'));
+    previewId = await originId(bridge, 'http://localhost:7600');
     await kill();
     assert.equal((await send('sent while you were gone')).status, 200);
     await start();

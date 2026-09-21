@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fmt } from '../lib/format.mjs';
-import { ROOT, comment, connect, freePort, listen, preview, register, resolveOrigin, startBridge } from './helpers.mjs';
+import { ROOT, comment, connect, freePort, listen, open, originId, register, resolveOrigin, startBridge } from './helpers.mjs';
 
 describe('bridge', () => {
   let bridge;
@@ -20,7 +20,7 @@ describe('bridge', () => {
 
   describe('control routes', () => {
     test('refuse a caller without the token', async () => {
-      for (const route of ['/register', '/preview', '/connect']) {
+      for (const route of ['/register', '/open', '/connect']) {
         const res = await bridge.request(route, { json: { key, pid: process.pid }, token: null });
         assert.equal(res.status, 401, route);
       }
@@ -94,13 +94,47 @@ describe('bridge', () => {
     });
   });
 
-  describe('file previews', () => {
+  describe('/open', () => {
     test('the same file keeps its preview id', async () => {
       const file = path.join(files, 'page.html');
       fs.writeFileSync(file, '<html><body><h1>hi</h1></body></html>');
-      const a = await preview(bridge, key, file);
-      const b = await preview(bridge, key, file);
+      const a = await open(bridge, key, file);
+      const b = await open(bridge, key, file);
       assert.equal(a.previewId, b.previewId);
+      assert.equal(a.url, `${bridge.origin}/p/${a.previewId}/`);
+      assert.equal(a.kind, 'html');
+    });
+
+    // A page in the browser needs nothing done to it: the extension is already on every origin,
+    // and the button is already there. Opening one would only be a second way to do nothing.
+    test('refuses a web page, which needs no opening', async () => {
+      const res = await bridge.request('/open', { json: { key, target: 'http://localhost:5173/' } });
+      assert.equal(res.status, 400);
+      assert.match((await res.json()).error, /^web pages need no opening/);
+    });
+
+    // Nothing can place an anchor inside Chrome's PDF viewer, so a comment on one is a rectangle
+    // with nothing to find again. Refused outright rather than served into a dead end.
+    test('refuses a PDF, whatever case its name is written in', async () => {
+      const file = path.join(files, 'spec.PDF');
+      fs.writeFileSync(file, 'never read');
+      const res = await bridge.request('/open', { json: { key, target: file } });
+      assert.equal(res.status, 415);
+      assert.match((await res.json()).error, /^PDF is not supported/);
+    });
+
+    /**
+     * Opening used to claim the browser, which meant that a file Claude opened silently redirected
+     * every page's comments to the session that opened it - including the user's own pages, which
+     * they had connected somewhere else on purpose. Setup is `/connect`'s gesture and nothing else's.
+     */
+    test('does not take the browser from the session that connected', async () => {
+      const other = await register(bridge, `p${process.pid}1`);
+      await connect(bridge, key);
+      const file = path.join(files, 'elsewhere.html');
+      fs.writeFileSync(file, '<h1>hi</h1>');
+      await open(bridge, other, file);
+      assert.equal((await (await bridge.request('/health')).json()).primary, key);
     });
 
     // The overlay arrives from the extension now, so the page the user reviews is the file they
@@ -110,40 +144,49 @@ describe('bridge', () => {
       const file = path.join(files, 'inline.html');
       const source = '<html><body><script>const s = "</body>";</script>hi</body></html>';
       fs.writeFileSync(file, source);
-      const { previewId } = await preview(bridge, key, file);
+      const { previewId } = await open(bridge, key, file);
       const res = await bridge.request(`/p/${previewId}/`);
       assert.equal(res.headers.get('content-type'), 'text/html; charset=utf-8');
       assert.equal(await res.text(), source);
     });
 
-    test('a PDF whose name has spaces and CJK is served', async () => {
-      const name = '報告 final.pdf';
-      fs.writeFileSync(path.join(files, name), '%PDF-1.4 test');
-      const { previewId } = await preview(bridge, key, path.join(files, name));
+    // An image is linked from the wrapper page rather than read into it, so its name travels
+    // through a URL and back: percent-encoded on the way out, decoded against the disk on the
+    // way in. A name with a space and non-ASCII in it is where that used to come apart.
+    test('a file whose name has spaces and CJK is served', async () => {
+      // The smallest thing a browser will render: a 1x1 PNG, written from here so that no
+      // fixture has to exist for it.
+      const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8'
+        + 'BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+      const name = '報告 final.png';
+      fs.writeFileSync(path.join(files, name), png);
+      const { previewId, kind } = await open(bridge, key, path.join(files, name));
+      assert.equal(kind, 'image');
       const page = await (await bridge.request(`/p/${previewId}/`)).text();
       const src = /src="\.\/(__target\/[^"]+)"/.exec(page)[1];
       const res = await bridge.request(`/p/${previewId}/${src}`);
       assert.equal(res.status, 200);
-      assert.equal(await res.text(), '%PDF-1.4 test');
+      assert.equal(res.headers.get('content-type'), 'image/png');
+      assert.deepEqual(Buffer.from(await res.arrayBuffer()), png);
     });
 
     test('a plain text file shows its text', async () => {
       const file = path.join(files, 'notes.txt');
       fs.writeFileSync(file, 'line <one>');
-      const { previewId, kind } = await preview(bridge, key, file);
+      const { previewId, kind } = await open(bridge, key, file);
       assert.equal(kind, 'text');
       assert.match(await (await bridge.request(`/p/${previewId}/`)).text(), /line &lt;one&gt;/);
     });
 
     test('an id without its trailing slash is redirected to it', async () => {
-      const { previewId } = await preview(bridge, key, path.join(files, 'notes.txt'));
+      const { previewId } = await open(bridge, key, path.join(files, 'notes.txt'));
       const res = await bridge.request(`/p/${previewId}`);
       assert.equal(res.status, 301);
       assert.equal(res.headers.get('location'), `/p/${previewId}/`);
     });
 
     test('a path cannot climb out of the preview root', async () => {
-      const { previewId } = await preview(bridge, key, path.join(files, 'notes.txt'));
+      const { previewId } = await open(bridge, key, path.join(files, 'notes.txt'));
       for (const rel of ['..%2f..%2fetc%2fpasswd', '%2e%2e/%2e%2e/secret']) {
         assert.equal((await bridge.request(`/p/${previewId}/${rel}`)).status, 404, rel);
       }
@@ -160,7 +203,7 @@ describe('bridge', () => {
     after(() => monitor.close());
 
     test('numbers per page and never below what the page already shows', async () => {
-      const { previewId } = await preview(bridge, key, 'http://localhost:5173/');
+      const previewId = await originId(bridge, 'http://localhost:5173');
       assert.equal((await (await comment(bridge, previewId)).json()).n, 1);
       assert.equal((await (await comment(bridge, previewId, { after: 7 })).json()).n, 8);
       const other = { page: { url: 'http://localhost:5173/b' } };
@@ -191,7 +234,7 @@ describe('bridge', () => {
     test('from a page this bridge serves carries the file it came from', async () => {
       const file = path.join(files, 'design.html');
       fs.writeFileSync(file, '<h1>hi</h1>');
-      const { previewId } = await preview(bridge, key, file);
+      const { previewId } = await open(bridge, key, file);
       // Its own stream: the comments above are still sitting unread on the suite's monitor.
       const monitor = await listen(bridge, key);
       try {
@@ -209,7 +252,7 @@ describe('bridge', () => {
 
     // Any other page is a page on the web, and there is no file behind it to name.
     test('from anywhere else carries no file', async () => {
-      const { previewId } = await preview(bridge, key, 'http://localhost:5173/');
+      const previewId = await originId(bridge, 'http://localhost:5173');
       const monitor = await listen(bridge, key);
       try {
         // A path that looks like a served one, on an origin that is not this bridge.
@@ -254,7 +297,7 @@ test('previews, counters and seq survive a daemon restart', async () => {
   const key = await register(first);
   // The session's monitor, on the daemon that is about to go away.
   const monitor = await listen(first, key);
-  const { previewId } = await preview(first, key, 'http://localhost:7000/');
+  const previewId = await originId(first, 'http://localhost:7000');
   assert.equal((await (await comment(first, previewId, { comment: 'one', page })).json()).n, 1);
   await monitor.close();
   await first.stop();
@@ -413,8 +456,8 @@ describe('a comment with nobody connected', () => {
     bridge = await startBridge();
     // A session that can end: the record it opens has to outlive it.
     ended = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
-    const key = await register(bridge, `p${ended.pid}`, ended.pid);
-    ({ previewId } = await preview(bridge, key, 'http://localhost:7600/'));
+    await register(bridge, `p${ended.pid}`, ended.pid);
+    previewId = await originId(bridge, 'http://localhost:7600');
     await new Promise((resolve) => { ended.once('exit', resolve); ended.kill('SIGKILL'); });
     await bridge.request('/health'); // which prunes, leaving nothing holding the browser
   });
@@ -464,7 +507,7 @@ describe('a session with nothing listening', () => {
   });
 
   test('refuses the comment instead of accepting one that goes nowhere', async () => {
-    const { previewId } = await preview(bridge, key, 'http://localhost:7100/');
+    const previewId = await originId(bridge, 'http://localhost:7100');
 
     const nobody = await ask(previewId);
     assert.equal(nobody.status, 409);
@@ -500,7 +543,7 @@ describe('a screenshot the bridge cannot save', () => {
     // A listener of our own is what makes the comment deliverable - no test daemon has a grace
     // window - and it is also how the delivered event is read back.
     monitor = await listen(bridge, key);
-    ({ previewId } = await preview(bridge, key, 'http://localhost:7300/'));
+    previewId = await originId(bridge, 'http://localhost:7300');
   });
   after(async () => {
     await monitor.close();
@@ -565,7 +608,7 @@ describe('more comments in a minute than a session will take', () => {
   const session = async (key, target) => {
     await register(bridge, key);
     const monitor = await listen(bridge, key);
-    const { previewId } = await preview(bridge, key, target);
+    const previewId = await originId(bridge, target);
     return {
       key,
       previewId,
@@ -644,10 +687,10 @@ describe('a monitor that has never printed a comment', () => {
     other = await register(bridge, `p${process.pid}1`);
     sentinel = await listen(bridge, key);
     otherSentinel = await listen(bridge, other);
-    ({ previewId } = await preview(bridge, key, 'http://localhost:7500/'));
-    ({ previewId: otherPreview } = await preview(bridge, other, 'http://localhost:7501/'));
-    // Opening a target is a setup gesture, so the second one left the browser with `other`.
-    // Everything below is about this session's stream, so it takes the browser back.
+    previewId = await originId(bridge, 'http://localhost:7500');
+    otherPreview = await originId(bridge, 'http://localhost:7501');
+    // An id is a name for an origin and carries no session, so neither of the two above says
+    // anything about where a comment goes. Everything below is about this session's stream.
     await connect(bridge, key);
   });
   after(async () => {
@@ -783,7 +826,7 @@ describe('a monitor between streams', () => {
   };
 
   test('a comment is still taken after it re-registers', async () => {
-    const { previewId } = await preview(bridge, key, 'http://localhost:7200/');
+    const previewId = await originId(bridge, 'http://localhost:7200');
     // Past the floor a just-started daemon gets, so only lastStream can hold the window open.
     await new Promise((r) => setTimeout(r, GRACE + 50));
     // The first request after an idle gap costs far more than a warm one on this loopback -

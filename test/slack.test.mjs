@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { comment, listen, preview, register, startBridge } from './helpers.mjs';
+import { comment, listen, originId, register, startBridge } from './helpers.mjs';
 
 /**
  * A Slack that records what it was asked for. Every method the bridge calls answers here, so a
@@ -175,9 +175,8 @@ describe('slack', () => {
     fs.rmSync(config, { recursive: true, force: true });
   });
 
-  /** The id of a preview on this suite's session - the only part of it /slack/share needs. */
-  const opened = async (target = 'http://localhost:5173/') =>
-    (await preview(bridge, key, target)).previewId;
+  /** The id an origin is known by - the only part of a page /slack/share needs. */
+  const opened = (origin = 'http://localhost:5173') => originId(bridge, origin);
 
   /** The login the panel's Slack side needs: authorize, then the callback Slack would make. */
   const login = async () => {
@@ -555,7 +554,7 @@ describe('a refresh Slack granted but the disk would not keep', () => {
   });
 
   const share = async () => {
-    const { previewId } = await preview(bridge, key, 'http://localhost:5173/');
+    const previewId = await originId(bridge, 'http://localhost:5173');
     return bridge.request('/slack/share', {
       token: null,
       headers: { origin: 'chrome-extension://abc' },

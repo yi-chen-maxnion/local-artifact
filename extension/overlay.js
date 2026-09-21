@@ -1045,8 +1045,8 @@
   // this one sheet goes into the document and is switched by a class on <html>.
   //
   // While picking, embedded documents stop taking the pointer. A PDF viewer or an iframe is a
-  // separate frame: its mouse events never reach this document, so a drag over the PDF a wrapper
-  // page shows did nothing at all, and a click into an iframe went straight past the freeze.
+  // separate frame: its mouse events never reach this document, so a drag over an embedded
+  // viewer did nothing at all, and a click into an iframe went straight past the freeze.
   // With them transparent to the pointer, the drag lands here and becomes a plain region.
   const cursorSheet = document.createElement('style');
   cursorSheet.textContent =

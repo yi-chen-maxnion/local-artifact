@@ -2,8 +2,8 @@
 
 Claude's cloud artifacts let you point at something on the page, leave a comment, and have it
 land back in the session. This does the same thing for pages that aren't artifacts — a dev
-server, a generated `report.html`, a PDF — with no per-repo integration and no assumptions about
-your stack.
+server, a generated `report.html`, a rendered note — with no per-repo integration and no
+assumptions about your stack.
 
 ```
 /connect                              →  this session now owns the browser
@@ -213,7 +213,7 @@ page (overlay.js)                    bridge daemon 127.0.0.1:4517           clau
 | target | how the overlay gets in | extension needed? |
 |---|---|---|
 | `report.html` | bridge injects `<script src="/overlay.js">` | no |
-| `spec.pdf`, `.png`, `.md`, `.txt` | bridge serves a wrapper page holding the overlay | no |
+| `diagram.png`, `.md`, `.txt` | bridge serves a wrapper page holding the overlay | no |
 | `http://localhost:5173/…`, a deployed build | the extension injects it | yes |
 
 The bridge still serves the first two rows, but since `/connect` takes no target there is no
@@ -231,7 +231,7 @@ command that hands it a file: the extension's row is the one you get.
 - **The screenshot is missing.** The notification's `shot` line says why — no extension on the
   page, the page was not the visible tab when the shot was taken (only that tab is ever
   captured), or the capture error Chrome gave. After reloading the extension, refresh the page.
-- **Can't point at part of a PDF or an iframe.** In comment mode these ignore the pointer so a
+- **Can't point at part of an iframe or an embedded viewer.** In comment mode these ignore the pointer so a
   drag over them becomes a region; leave comment mode to scroll them.
 - **No button on a page.** The origin may be turned off (the toolbar badge says `off`; the toolbar menu turns it back on), or no
   session has run `/connect` yet.
@@ -245,11 +245,11 @@ monitor is connected.
 .claude-plugin/   plugin + marketplace manifests
 monitors/         the auto-armed monitor declaration
 lib/              common.mjs (session key, ports, token, bridge client), format.mjs (notification text)
-bridge/           server, static serving + HTML injection, PDF/image/md/text wrapper, scratch store, slack.mjs
-scripts/          monitor.mjs (session side), connect.mjs, ctl.mjs
+bridge/           server, static serving + HTML injection, image/md/text wrapper, scratch store, slack.mjs
+scripts/          monitor.mjs (session side), connect.mjs, open.mjs (Claude opens a file), ctl.mjs
 slack-app.json    the client id of the Slack app comments are posted through (not a secret)
 extension/        MV3 extension, overlay.js and console-hook.js (also served by the bridge), popup (toolbar menu)
-skills/           what Claude does with a comment
+skills/           what Claude does with a comment (ui-comments), and how it opens a file (show-file)
 commands/         /connect, /comments, /slack
 fixtures/         pages for checking the overlay by hand
 test/             node --test suites for the bridge and the notification format

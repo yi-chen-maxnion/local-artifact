@@ -238,7 +238,7 @@ dock's layout, so while hidden it does not widen the dock's catch zone over the 
 
   That only works if the drag reaches the page at all. A PDF viewer — and any `iframe`, `embed`
   or `object` — is a separate frame whose mouse events never arrive in this document, so for a
-  while a drag over the PDF a wrapper page shows did nothing, and a click into an iframe went
+  while a drag over an embedded viewer did nothing, and a click into an iframe went
   straight past the freeze. While picking, those elements are made transparent to the pointer; the
   price is that they cannot be scrolled until comment mode is left. Hit-testing then passes
   through them too, so the target lookup puts them back: a point over a frame, with nothing but
@@ -686,12 +686,13 @@ refresh any page you had open.**
 | target | how the overlay gets in | extension needed? |
 |---|---|---|
 | `report.html` | bridge injects `<script src="/overlay.js">` | no |
-| `spec.pdf`, `.png`, `.md`, `.txt` | bridge serves a wrapper page holding the overlay | no |
+| `diagram.png`, `.md`, `.txt` | bridge serves a wrapper page holding the overlay | no |
 | `http://localhost:5173/…` | the extension injects it into its isolated world | yes (or bookmarklet) |
 
-Wrapping the PDF rather than handing it to Chrome's own viewer is deliberate: a content script
-cannot reach the DOM inside that viewer, but it can sit above an `<embed>` in a page we control.
-Anything that is not a page, a PDF, markdown or an image is shown as plain text.
+Anything that is not a page, markdown or an image is shown as plain text. **PDF is deliberately
+not among them**: nothing can place an anchor inside Chrome's PDF viewer, so a comment on one is a
+rectangle with nothing to find again, and `/open` refuses a `.pdf` outright rather than wrap it
+into a dead end.
 
 ## Delivery
 

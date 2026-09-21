@@ -48,16 +48,15 @@ function renderMarkdown(src) {
 }
 
 /**
- * A wrapper page for targets we cannot inject into. The overlay the extension injects lands in
- * this outer document, so region-drag anchoring and captureVisibleTab work over a PDF - which
- * a script cannot do inside Chrome's own PDF viewer.
+ * A wrapper page for a target that is not itself a page: an image, a markdown note, plain text.
+ * The overlay the extension injects lands in this document, so anchoring and captureVisibleTab
+ * work over the thing it shows.
  */
 export function wrapperPage({ kind, title, src, text }) {
   const body =
-    kind === 'pdf' ? `<embed class="cc-fill" src="${esc(src)}" type="application/pdf">`
-      : kind === 'image' ? `<div class="cc-pad"><img src="${esc(src)}" alt="${esc(title)}"></div>`
-        : kind === 'markdown' ? `<article class="cc-doc">${renderMarkdown(text || '')}</article>`
-          : `<pre class="cc-text">${esc(text || '')}</pre>`;
+    kind === 'image' ? `<div class="cc-pad"><img src="${esc(src)}" alt="${esc(title)}"></div>`
+      : kind === 'markdown' ? `<article class="cc-doc">${renderMarkdown(text || '')}</article>`
+        : `<pre class="cc-text">${esc(text || '')}</pre>`;
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -67,7 +66,6 @@ export function wrapperPage({ kind, title, src, text }) {
   :root { color-scheme: light dark; }
   html,body { margin:0; height:100%; }
   body { background:#f6f6f7; font:14px/1.6 ui-sans-serif,system-ui,-apple-system,sans-serif; }
-  .cc-fill { display:block; width:100%; height:100vh; border:0; }
   .cc-pad { min-height:100vh; display:grid; place-items:center; padding:24px; }
   .cc-pad img { max-width:100%; height:auto; box-shadow:0 1px 3px #0003; }
   .cc-doc { max-width:46rem; margin:0 auto; padding:48px 24px 96px; }

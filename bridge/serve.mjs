@@ -14,11 +14,10 @@ const TYPES = {
 
 export const contentType = (f) => TYPES[path.extname(f).toLowerCase()] || 'application/octet-stream';
 
-/** Anything that is not a page, a PDF, markdown or an image is shown as plain text. */
+/** Anything that is not a page, markdown or an image is shown as plain text. */
 export const kindOf = (f) => {
   const e = path.extname(f).toLowerCase();
   if (e === '.html' || e === '.htm') return 'html';
-  if (e === '.pdf') return 'pdf';
   if (e === '.md' || e === '.markdown') return 'markdown';
   if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.svg'].includes(e)) return 'image';
   return 'text';

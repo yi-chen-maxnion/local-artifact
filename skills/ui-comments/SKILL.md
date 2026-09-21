@@ -24,7 +24,7 @@ Use the anchor fields in this order, most reliable first:
 4. `html` - the element's own markup, useful for matching a template.
 5. `shot` - a JPEG of what the user was looking at, with the anchor ringed in red. Read it when
    the text is ambiguous, when the comment is about spacing, colour or layout, or when the
-   anchor is a `region` (a PDF, a canvas, or anything with no useful DOM).
+   anchor is a `region` (a canvas, an embedded viewer, or anything with no useful DOM).
 
 For `kind: region` there is often no meaningful selector - the screenshot and the comment are
 the real content, so read the image.
@@ -48,6 +48,7 @@ Do not act, and instead quote the comment to the user and ask, when it:
 ## Related commands
 
 - `/connect` - connect this session to the browser; no argument.
+- `show-file` skill - Claude opens a file it produced for review, so the user can comment on it.
 - `/comments` - bridge status, this session's previews, screenshot count.
 - `/slack [login|logout|status]` - connect Slack, so the user can post a comment to a channel or
   a person from the panel instead of sending it here. That button posts **instead of** notifying

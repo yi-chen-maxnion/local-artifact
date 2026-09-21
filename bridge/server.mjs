@@ -24,12 +24,12 @@ const INSTANCE = shortId(6);
 /**
  * What separates this machine's own callers - connect, ctl, the monitor - from a web page.
  * A page in the browser can reach this port, and a plain `text/plain` POST from one is sent
- * without any CORS preflight; what it cannot do is read a 0600 file. So the routes that
- * register sessions, open files and stream comments require this token, which is written to
- * TOKEN_FILE once the port is ours.
+ * without any CORS preflight; what it cannot do is read a 0600 file. So the routes that register
+ * sessions, connect one to the browser, open files and stream comments require this token, which
+ * is written to TOKEN_FILE once the port is ours.
  */
 const TOKEN = shortId(16);
-const CONTROL = new Set(['/register', '/preview', '/connect', '/events']);
+const CONTROL = new Set(['/register', '/open', '/connect', '/events']);
 const BUILD = codeBuild(ROOT);
 
 /**
@@ -381,33 +381,39 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, primary: primaryKey });
     }
 
-    if (p === '/preview' && req.method === 'POST') {
+    /**
+     * A local file, put in front of the user. This is Claude's gesture and nobody else's: it has
+     * produced something whose point is to be looked at, and the file is served under `/p/<id>/`
+     * so that the extension can put the comment button on it as it does on any other page.
+     *
+     * Local files only. A web page needs nothing opened - every page the user visits already
+     * carries the button - and a PDF cannot be commented on at all, since nothing can place an
+     * anchor inside Chrome's viewer. Both are refused here rather than half-served.
+     *
+     * Opening is NOT a setup gesture. Which session receives comments is `/connect`'s answer and
+     * nothing else's; a file opened by a session that does not hold the browser must not quietly
+     * take it, or the user's own pages would start reporting somewhere they never asked for.
+     */
+    if (p === '/open' && req.method === 'POST') {
       const b = await readBody(req);
-      const s = sessions.get(b.key);
-      if (!s) return json(res, 409, { error: 'session not registered' });
+      if (!sessions.has(b.key)) return json(res, 409, { error: 'session not registered' });
       const target = String(b.target || '');
-      const origin = originOf(target);
-      let found;
-      if (origin) {
-        // Reused, not re-minted. The id is the namespace this origin's markers live in.
-        found = originPreview(origin);
-        found.pv.target = target;
-      } else {
-        const entry = path.resolve(target);
-        if (!isFile(entry)) return json(res, 404, { error: `not a file: ${entry}` });
-        found = previewFor((pv) => pv.entry === entry, {
-          kind: kindOf(entry), target, entry, root: path.dirname(entry),
+      if (originOf(target)) {
+        return json(res, 400, {
+          error: 'web pages need no opening - every page already carries the comment button',
         });
       }
-      // Opening a target IS a setup gesture too: it says which session the browser belongs to.
-      primaryKey = s.key;
+      if (/\.pdf$/i.test(target)) {
+        return json(res, 415, { error: "PDF is not supported - Chrome's PDF viewer admits no anchor" });
+      }
+      const entry = path.resolve(target);
+      if (!isFile(entry)) return json(res, 404, { error: `not a file: ${entry}` });
+      // Reused, not re-minted. The id is the namespace this file's markers live in.
+      const { previewId, pv } = previewFor((rec) => rec.entry === entry, {
+        kind: kindOf(entry), target, entry, root: path.dirname(entry),
+      });
       saveState();
-      const { previewId, pv } = found;
-      // A web target is opened as it is: which session a tab belongs to is the extension's
-      // question to ask the bridge, not something carried in the address bar.
-      const external = Boolean(pv.origin);
-      const open = external ? target : `${ORIGIN}/p/${previewId}/`;
-      return json(res, 200, { previewId, url: open, kind: pv.kind || 'origin', external, origin: pv.origin });
+      return json(res, 200, { previewId, url: `${ORIGIN}/p/${previewId}/`, kind: pv.kind });
     }
 
     /**
@@ -551,8 +557,8 @@ const server = http.createServer(async (req, res) => {
           if (!buf) return html(res, 404, gonePage(previewId));
           return send(res, 200, contentType(pv.entry), buf);
         }
-        // A PDF or an image is linked from the wrapper page, not read into it.
-        const linked = pv.kind === 'pdf' || pv.kind === 'image';
+        // An image is linked from the wrapper page, not read into it.
+        const linked = pv.kind === 'image';
         const text = linked ? '' : readIfFile(pv.entry)?.toString('utf8');
         if (linked ? !isFile(pv.entry) : text == null) return html(res, 404, gonePage(previewId));
         const name = path.basename(pv.entry);

@@ -110,11 +110,22 @@ export function resolveOrigin(bridge, origin) {
   });
 }
 
-/** Opens `target` for `key` and hands back the answer - `{ previewId, url, kind, ... }`. */
-export async function preview(bridge, key, target) {
-  const res = await bridge.request('/preview', { json: { key, target } });
-  assert.equal(res.status, 200);
+/** Opens a local file for `key` - the agent's gesture - and hands back `{ previewId, url, kind }`. */
+export async function open(bridge, key, file) {
+  const res = await bridge.request('/open', { json: { key, target: file } });
+  assert.equal(res.status, 200, `open ${file}`);
   return res.json();
+}
+
+/**
+ * The id an origin is known by. Minted on demand by /resolve, which is where every origin's id
+ * comes from now that opening is for local files alone: the extension asks about a page, and the
+ * answer carries the id the page's pins and comment numbers live under.
+ */
+export async function originId(bridge, origin) {
+  const res = await resolveOrigin(bridge, origin);
+  assert.equal(res.status, 200, `resolve ${origin}`);
+  return (await res.json()).previewId;
 }
 
 /**
