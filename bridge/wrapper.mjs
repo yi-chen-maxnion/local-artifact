@@ -48,11 +48,11 @@ function renderMarkdown(src) {
 }
 
 /**
- * A wrapper page for targets we cannot inject into. The overlay lives in the outer
- * document, so region-drag anchoring and captureVisibleTab work over a PDF - which a
- * content script cannot do inside Chrome's own PDF viewer.
+ * A wrapper page for targets we cannot inject into. The overlay the extension injects lands in
+ * this outer document, so region-drag anchoring and captureVisibleTab work over a PDF - which
+ * a script cannot do inside Chrome's own PDF viewer.
  */
-export function wrapperPage({ kind, title, src, text, tags }) {
+export function wrapperPage({ kind, title, src, text }) {
   const body =
     kind === 'pdf' ? `<embed class="cc-fill" src="${esc(src)}" type="application/pdf">`
       : kind === 'image' ? `<div class="cc-pad"><img src="${esc(src)}" alt="${esc(title)}"></div>`
@@ -82,7 +82,6 @@ export function wrapperPage({ kind, title, src, text, tags }) {
   }
 </style></head>
 <body>${body}
-${tags}
 </body></html>`;
 }
 
@@ -124,9 +123,9 @@ function noticePage(title, heading, body) {
 /** Shown when a preview id is not known - almost always an expired link, so say so. */
 export function gonePage(previewId) {
   return noticePage('Preview not found', 'This preview is no longer available', `
-    <p>Preview links live as long as the Claude Code session that opened them. This one has
-       ended, or its file was moved or deleted.</p>
-    <p>Run <code>/preview &lt;file-or-url&gt;</code> in Claude Code to open a fresh one.</p>
+    <p>Preview links live as long as the Claude Code session that opened them. That session has
+       ended, or the file was moved or deleted.</p>
+    <p>Ask Claude to show you the file again.</p>
     <p class="id">${esc(previewId)}</p>`);
 }
 

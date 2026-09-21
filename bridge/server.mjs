@@ -7,9 +7,7 @@ import {
 } from '../lib/common.mjs';
 import { previewHash } from '../lib/format.mjs';
 import { Store, decodeShot } from './store.mjs';
-import {
-  contentType, decodeSegments, injectOverlay, isFile, kindOf, overlayTags, readIfFile, safeJoin,
-} from './serve.mjs';
+import { contentType, decodeSegments, isFile, kindOf, readIfFile, safeJoin } from './serve.mjs';
 import { gonePage, slackPage, wrapperPage } from './wrapper.mjs';
 import * as slack from './slack.mjs';
 
@@ -299,9 +297,6 @@ function broadcast(sessionKey, payload) {
   }
 }
 
-// Single canonical copies: the extension packages these, and the bridge serves the same files.
-const SCRIPTS = new Set(['/overlay.js', '/console-hook.js']);
-
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, ORIGIN);
   const p = url.pathname;
@@ -403,8 +398,9 @@ const server = http.createServer(async (req, res) => {
       pruneSessions();
       const origin = originOf(url.searchParams.get('origin') || '');
       if (!origin) return json(res, 400, { error: 'origin required' });
-      // Pages the bridge serves carry their own preview id; there is nothing to resolve.
-      if (origin === ORIGIN) return json(res, 404, { error: 'bridge pages are bound by the bridge' });
+      // The bridge's own origin is answered like any other: the pages it serves used to carry a
+      // preview id in the markup, and now the extension asks about them the way it asks about a
+      // dev server. Numbering and pins stay per page, since pageKey holds the `/p/<id>/` path.
       // Whether the panel offers to post to Slack at all, and under whose name. Never a token.
       // Asked for only once there is an answer to attach it to: this route runs on every page load.
       const slackFor = () => {
@@ -519,12 +515,6 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    if (SCRIPTS.has(p)) {
-      const buf = readIfFile(path.join(ROOT, 'extension', p.slice(1)));
-      if (!buf) return json(res, 404, { error: 'missing' });
-      return send(res, 200, contentType(p), buf, { 'access-control-allow-origin': '*' });
-    }
-
     if (p.startsWith('/p/')) {
       const [, , previewId, ...rest] = p.split('/');
       const pv = previews.get(previewId);
@@ -536,15 +526,21 @@ const server = http.createServer(async (req, res) => {
       if (rel === null) return json(res, 400, { error: 'malformed path' });
 
       if (!rel) {
-        // A PDF or an image is linked from the page, not read into it.
+        // A page of the user's own is served as it is on disk, byte for byte. The extension puts
+        // the overlay on it, as it does on every other origin, so nothing here rewrites it - and
+        // what the person reviews is exactly the file they were shown.
+        if (pv.kind === 'html') {
+          const buf = readIfFile(pv.entry);
+          if (!buf) return html(res, 404, gonePage(previewId));
+          return send(res, 200, contentType(pv.entry), buf);
+        }
+        // A PDF or an image is linked from the wrapper page, not read into it.
         const linked = pv.kind === 'pdf' || pv.kind === 'image';
         const text = linked ? '' : readIfFile(pv.entry)?.toString('utf8');
         if (linked ? !isFile(pv.entry) : text == null) return html(res, 404, gonePage(previewId));
-        const tags = overlayTags({ previewId, repo: sessions.get(pv.sessionKey)?.repo || '' });
-        if (pv.kind === 'html') return html(res, 200, injectOverlay(text, tags));
         const name = path.basename(pv.entry);
         return html(res, 200, wrapperPage({
-          kind: pv.kind, title: name, tags, text, src: `./__target/${encodeURIComponent(name)}`,
+          kind: pv.kind, title: name, text, src: `./__target/${encodeURIComponent(name)}`,
         }));
       }
 

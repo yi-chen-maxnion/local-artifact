@@ -102,13 +102,17 @@ describe('bridge', () => {
       assert.equal(a.previewId, b.previewId);
     });
 
-    test('HTML gets both overlay tags, with the repo, before the last </body>', async () => {
+    // The overlay arrives from the extension now, so the page the user reviews is the file they
+    // were shown - not a rewritten copy of it. The inline `</body>` is what the injection used
+    // to have to reason about; nothing reasons about it any more.
+    test('HTML is served exactly as it is on disk', async () => {
       const file = path.join(files, 'inline.html');
-      fs.writeFileSync(file, '<html><body><script>const s = "</body>";</script>__ORIGIN__</body></html>');
+      const source = '<html><body><script>const s = "</body>";</script>hi</body></html>';
+      fs.writeFileSync(file, source);
       const { previewId } = await preview(bridge, key, file);
-      const body = await (await bridge.request(`/p/${previewId}/`)).text();
-      assert.match(body, /const s = "<\/body>";<\/script>__ORIGIN__<script src="\/console-hook\.js">/);
-      assert.match(body, new RegExp(`data-cc-preview="${previewId}" data-cc-origin="${bridge.origin}" data-cc-repo="repo"`));
+      const res = await bridge.request(`/p/${previewId}/`);
+      assert.equal(res.headers.get('content-type'), 'text/html; charset=utf-8');
+      assert.equal(await res.text(), source);
     });
 
     test('a PDF whose name has spaces and CJK is served', async () => {
@@ -116,7 +120,6 @@ describe('bridge', () => {
       fs.writeFileSync(path.join(files, name), '%PDF-1.4 test');
       const { previewId } = await preview(bridge, key, path.join(files, name));
       const page = await (await bridge.request(`/p/${previewId}/`)).text();
-      assert.match(page, /data-cc-repo="repo"/);
       const src = /src="\.\/(__target\/[^"]+)"/.exec(page)[1];
       const res = await bridge.request(`/p/${previewId}/${src}`);
       assert.equal(res.status, 200);
@@ -188,9 +191,17 @@ describe('bridge', () => {
       assert.equal((await bridge.request(q, { token: null, headers: { origin: 'chrome-extension://abc' } })).status, 200);
     });
 
-    test('never binds the bridge origin itself', async () => {
-      const res = await bridge.request(`/resolve?origin=${encodeURIComponent(bridge.origin)}`, { token: null });
-      assert.equal(res.status, 404);
+    // A page the bridge serves is bound like any other page: the extension asks who owns this
+    // origin and injects the overlay itself. It used to be refused here, back when the markup
+    // the bridge wrote carried the binding.
+    test('binds its own origin too, for the files it serves', async () => {
+      const res = await bridge.request(`/resolve?origin=${encodeURIComponent(bridge.origin)}`, {
+        token: null, headers: { origin: 'chrome-extension://abc' },
+      });
+      assert.equal(res.status, 200);
+      const j = await res.json();
+      assert.ok(j.previewId, JSON.stringify(j));
+      assert.equal(j.repo, 'repo');
     });
   });
 });

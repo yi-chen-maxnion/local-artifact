@@ -75,8 +75,11 @@ async function resolveOrigin(origin, previewId = null) {
 async function ensureBound(tabId, url) {
   await ready;
   const origin = originOf(url);
-  // A page the bridge serves carries its own binding and loads its own overlay.
-  if (!origin || origin === BRIDGE || disabled.has(origin)) return null;
+  if (!origin || disabled.has(origin)) return null;
+  // The bridge serves the user's own files under /p/, and those are pages to comment on like any
+  // other. Its remaining pages are notices it writes itself - /slack/callback says a login worked
+  // - where there is nothing of the user's to point at.
+  if (origin === BRIDGE && !new URL(url).pathname.startsWith('/p/')) return null;
 
   const fromHash = /[#&]cc=([a-f0-9]{8,})/.exec(url)?.[1] || null;
   let binding = bound.get(tabId);
@@ -113,8 +116,7 @@ async function ensureBound(tabId, url) {
     // in the page world, because that is where the page's console is. Each guards against
     // running twice, since this happens on every completed load.
     // The first two have nothing to do with each other; the overlay needs both, since it reads
-    // __ccConfig as it starts and listens for a hook that must already be there - the ordering
-    // rule `overlayTags` states in bridge/serve.mjs.
+    // __ccConfig as it starts and listens for a hook that must already be there.
     await Promise.all([
       chrome.scripting.executeScript({
         target,

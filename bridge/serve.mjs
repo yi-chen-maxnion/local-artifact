@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { ORIGIN } from '../lib/common.mjs';
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
@@ -27,29 +26,6 @@ export const kindOf = (f) => {
 
 export const esc = (s) =>
   String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-/**
- * The tags that put the overlay on a page the bridge serves - the console hook first, since it
- * has to be in place before the overlay listens for it. Every bridge-served page, whatever its
- * kind, is built from this one string.
- */
-export function overlayTags({ previewId, repo = '' }) {
-  return '<script src="/console-hook.js"></script>\n'
-    + `<script src="/overlay.js" data-cc-preview="${esc(previewId)}" data-cc-origin="${esc(ORIGIN)}" `
-    + `data-cc-repo="${esc(repo)}"></script>`;
-}
-
-/**
- * Inject the overlay into HTML we serve ourselves, so the no-extension path works. Before the
- * LAST closing tag: an inline script may well contain the string "</body>".
- */
-export function injectOverlay(html, tags) {
-  for (const re of [/<\/body\s*>/gi, /<\/html\s*>/gi]) {
-    const last = [...html.matchAll(re)].at(-1);
-    if (last) return `${html.slice(0, last.index)}${tags}\n${html.slice(last.index)}`;
-  }
-  return html + tags;
-}
 
 /** Request path segments arrive percent-encoded and files on disk are not. Null if malformed. */
 export function decodeSegments(parts) {
