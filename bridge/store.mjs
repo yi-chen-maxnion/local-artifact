@@ -65,12 +65,6 @@ export class Store {
     }
   }
 
-  dropCounter(previewId) {
-    for (const key of this.#counters.keys()) {
-      if (key === previewId || key.startsWith(`${previewId}|`)) this.#counters.delete(key);
-    }
-  }
-
   /**
    * Persist the screenshot next to the session that will read it. Returns its path, or null.
    *

@@ -40,7 +40,14 @@ const BUILD = codeBuild(ROOT);
 const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
 const sessions = new Map(); // key -> { key, pid, cwd, repo, at }
-// previewId -> { sessionKey, sessionPid, target, kind, root, entry, external, origin?, claimed?, claimedAt? }
+/**
+ * previewId -> an origin `{ origin, target, at }` or a served file `{ target, entry, kind, root, at }`.
+ *
+ * A record is a name, not a routing decision: it exists to give one origin - or one served file -
+ * a stable id, because that id is the namespace its pins and its comment numbers live in. Which
+ * session a comment goes to is decided at comment time from `primaryKey` and nowhere else, so
+ * nothing here carries a session, and a record outlives every session that ever used it.
+ */
 const previews = new Map();
 const clients = new Map(); // key -> Set<res>
 const store = new Store();
@@ -159,20 +166,41 @@ function saveState() {
   } catch {}
 }
 
+/**
+ * How many records a restart carries forward, most recently used first.
+ *
+ * Nothing drops them any more - they outlive the sessions that used them, which is the whole
+ * point of them - so the file is what has to be bounded. A pin is worth keeping for as long as
+ * anyone might still be looking at the page it is on; two hundred origins and files is far more
+ * than that and still a small file.
+ */
+const MAX_PREVIEWS = 200;
+
 function loadState() {
   let raw;
   try { raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return; }
   seq = Number(raw.seq) || 0;
   primaryKey = raw.primaryKey || null;
+  const kept = [];
+  // Rebuilt field by field rather than taken as it was written: a state file from before records
+  // lost their session carries `sessionKey`, `sessionPid`, `claimed` and `claimedAt`, and reading
+  // it must neither fail nor let any of that back into a live record.
   for (const [id, pv] of raw.previews || []) {
-    // Drop what can no longer work: the owning session is gone, or the file was deleted.
-    if (!pidAlive(pv.sessionPid)) continue;
-    if (!pv.external && !isFile(pv.entry)) continue;
-    // Minted before ids were per origin, these carry only their target. Given their origin once,
-    // here, nothing downstream has to know the old shape existed.
-    if (pv.external && !pv.origin) pv.origin = originOf(pv.target);
-    previews.set(id, pv);
+    const at = Number(pv.at) || 0;
+    if (pv.entry) {
+      // A served file. Drop what can no longer work: the file was deleted or moved.
+      if (!isFile(pv.entry)) continue;
+      kept.push([id, { target: pv.target, entry: pv.entry, kind: pv.kind, root: pv.root, at }]);
+      continue;
+    }
+    // An origin. Ids from the older, per-target format carry only their target; given their
+    // origin once, here, nothing downstream has to know the old shape existed.
+    const origin = pv.origin || originOf(pv.target);
+    if (!origin) continue;
+    kept.push([id, { origin, target: pv.target || origin, at }]);
   }
+  kept.sort((a, b) => b[1].at - a[1].at);
+  for (const [id, pv] of kept.slice(0, MAX_PREVIEWS)) previews.set(id, pv);
   store.restoreCounters(raw.counters, (id) => previews.has(id));
 }
 
@@ -184,6 +212,23 @@ function pageKey(u) {
   } catch { return ''; }
 }
 
+/**
+ * The file on disk a comment is about, when the page it came from is one this bridge serves.
+ *
+ * A comment on `http://127.0.0.1:4517/p/a1b2c3d4/` names a loopback URL and nothing else, which
+ * says nothing about which file the session should go and edit. The record already knows, so the
+ * notification carries the path rather than making a session guess it back.
+ */
+function fileFor(pageUrl) {
+  let u;
+  // No base: a relative URL is not a page the browser was on, and must not resolve into one.
+  try { u = new URL(pageUrl || ''); } catch { return undefined; }
+  if (u.origin !== ORIGIN) return undefined;
+  const [, p, id] = u.pathname.split('/');
+  if (p !== 'p' || !id) return undefined;
+  return previews.get(id)?.entry;
+}
+
 /** The origin of an http(s) target, or null for anything else. */
 function originOf(target) {
   try {
@@ -193,52 +238,36 @@ function originOf(target) {
 }
 
 /**
- * One preview per (session, origin) and per (session, file), created on demand and then reused -
- * so a page's markers, which live in `localStorage` under the preview id, survive both a second
- * `/preview` and a daemon restart. Minting a fresh id per invocation silently orphaned every pin.
+ * One record per origin and one per served file, created on demand and then reused - so a page's
+ * markers, which live in `localStorage` under the preview id, survive a second open, another
+ * session taking the browser, and a daemon restart. Minting a fresh id per invocation silently
+ * orphaned every pin, and minting one per session orphaned them again at every handover.
+ *
+ * Every hit is a use, so `at` is what the bound in `loadState` reads: the records a restart keeps
+ * are the ones pages were recently resolving.
  */
-function previewFor(sessionKey, match, init) {
+function previewFor(match, init) {
   for (const [previewId, pv] of previews) {
-    if (pv.sessionKey === sessionKey && match(pv)) return { previewId, pv, created: false };
+    if (!match(pv)) continue;
+    pv.at = Date.now();
+    return { previewId, pv, created: false };
   }
-  const s = sessions.get(sessionKey);
-  if (!s) return null;
   const previewId = shortId(8);
-  const pv = { sessionKey, sessionPid: s.pid, ...init };
+  const pv = { ...init, at: Date.now() };
   previews.set(previewId, pv);
   return { previewId, pv, created: true };
 }
 
-const originPreview = (sessionKey, origin) => previewFor(sessionKey, (pv) => pv.origin === origin, {
-  kind: 'origin', target: origin, origin, external: true, root: null, entry: null,
-});
-
-/** The session a page on this origin belongs to, or null if nothing is set up. */
-function ownerOf(origin) {
-  // An origin that was explicitly opened with /preview stays with the session that opened it,
-  // whatever has been set up since - and where several live sessions have opened it, with the one
-  // that opened it last. Insertion order would hand it to whoever got there first and never let go,
-  // so a second session running /preview on the same app would be told it owns a browser it does not.
-  let best = null;
-  for (const pv of previews.values()) {
-    if (pv.origin !== origin || !pv.claimed || !sessions.has(pv.sessionKey)) continue;
-    // Claimed by a daemon older than claimedAt: outranked by any claim that carries a time.
-    if (!best || (pv.claimedAt || 0) > (best.claimedAt || 0)) best = pv;
-  }
-  if (best) return best.sessionKey;
-  return sessions.has(primaryKey) ? primaryKey : null;
-}
+const originPreview = (origin) => previewFor((pv) => pv.origin === origin, { origin, target: origin });
 
 /**
- * The setup gesture, whatever made it: from now on this session owns the browser.
+ * The session every comment goes to, or null when nothing is connected.
  *
- * It claims no origin of its own - `ownerOf` falls back to it only for origins nobody opened
- * explicitly, which is precisely the "any page you open" case the extension relies on.
+ * One rule, asked at the moment a comment arrives rather than at the moment a page was first
+ * seen: the session that ran `/connect` last. Where a page came from does not enter into it -
+ * an origin is a name for pins, not a claim on anyone's attention.
  */
-function claimBrowser(key) {
-  primaryKey = key;
-  saveState();
-}
+const connectedSession = () => (primaryKey && sessions.has(primaryKey) ? primaryKey : null);
 
 function pruneSessions() {
   let changed = false;
@@ -246,11 +275,8 @@ function pruneSessions() {
     if (pidAlive(s.pid)) continue;
     changed = true;
     sessions.delete(key);
-    for (const [id, pv] of previews) {
-      if (pv.sessionKey !== key) continue;
-      previews.delete(id);
-      store.dropCounter(id); // or it is written back to disk forever
-    }
+    // The records stay. They are ids for pins that are still on pages in the browser, and the
+    // next session to connect inherits both rather than starting the numbering over.
     for (const res of clients.get(key) || []) { try { res.end(); } catch {} }
     clients.delete(key);
     commentRate.delete(key);
@@ -316,8 +342,7 @@ const server = http.createServer(async (req, res) => {
         primary: primaryKey, slack: slack.status(),
         sessions: [...sessions.values()].map((s) => ({ ...s, clients: clients.get(s.key)?.size || 0 })),
         previews: [...previews.entries()].map(([id, v]) => ({
-          id, sessionKey: v.sessionKey, target: v.target, kind: v.kind,
-          origin: v.origin || undefined, claimed: v.claimed || undefined,
+          id, target: v.target, kind: v.kind, origin: v.origin || undefined,
         })),
       });
     }
@@ -338,7 +363,7 @@ const server = http.createServer(async (req, res) => {
       // A monitor reconnecting is not a setup gesture, so it does not steal the browser from
       // another session - but if nothing holds it, someone has to.
       if (!sessions.has(primaryKey)) primaryKey = b.key;
-      return json(res, 200, { ok: true, previews: [...previews.values()].filter((v) => v.sessionKey === b.key).length });
+      return json(res, 200, { ok: true, previews: previews.size });
     }
 
     /**
@@ -349,7 +374,10 @@ const server = http.createServer(async (req, res) => {
     if (p === '/connect' && req.method === 'POST') {
       const b = await readBody(req);
       if (!sessions.has(b.key)) return json(res, 409, { error: 'session not registered' });
-      claimBrowser(b.key);
+      // The whole of the setup gesture: from now on this session owns the browser, and every
+      // comment from every page goes to it.
+      primaryKey = b.key;
+      saveState();
       return json(res, 200, { ok: true, primary: primaryKey });
     }
 
@@ -362,25 +390,24 @@ const server = http.createServer(async (req, res) => {
       let found;
       if (origin) {
         // Reused, not re-minted. The id is the namespace this origin's markers live in.
-        found = originPreview(b.key, origin);
-        found.pv.claimed = true; // an explicit open outranks "whoever set up last"
-        found.pv.claimedAt = Date.now(); // and a later explicit open outranks an earlier one
+        found = originPreview(origin);
         found.pv.target = target;
       } else {
         const entry = path.resolve(target);
         if (!isFile(entry)) return json(res, 404, { error: `not a file: ${entry}` });
-        found = previewFor(b.key, (pv) => pv.entry === entry, {
-          kind: kindOf(entry), target, entry, root: path.dirname(entry), external: false,
+        found = previewFor((pv) => pv.entry === entry, {
+          kind: kindOf(entry), target, entry, root: path.dirname(entry),
         });
       }
-      found.pv.sessionPid = s.pid;
       // Opening a target IS a setup gesture too: it says which session the browser belongs to.
-      claimBrowser(b.key);
+      primaryKey = s.key;
+      saveState();
       const { previewId, pv } = found;
       // A web target is opened as it is: which session a tab belongs to is the extension's
       // question to ask the bridge, not something carried in the address bar.
-      const open = pv.external ? target : `${ORIGIN}/p/${previewId}/`;
-      return json(res, 200, { previewId, url: open, kind: pv.kind, external: pv.external, origin: pv.origin });
+      const external = Boolean(pv.origin);
+      const open = external ? target : `${ORIGIN}/p/${previewId}/`;
+      return json(res, 200, { previewId, url: open, kind: pv.kind || 'origin', external, origin: pv.origin });
     }
 
     /**
@@ -406,14 +433,17 @@ const server = http.createServer(async (req, res) => {
         const s = slack.status();
         return s.connected ? { connected: true, user: s.user } : { connected: false };
       };
-      const key = ownerOf(origin);
-      const found = key && originPreview(key, origin);
-      if (!found) {
+      const key = connectedSession();
+      if (!key) {
         return json(res, 404, {
           error: 'no session is set up',
           hint: 'run /connect in the Claude session that should receive comments',
         });
       }
+      // The id is the origin's own and says nothing about who receives its comments; the repo
+      // beside it is read fresh every time, so a page shows the session that holds the browser
+      // now rather than the one that happened to be there when the id was minted.
+      const found = originPreview(origin);
       if (found.created) saveState();
       return json(res, 200, {
         previewId: found.previewId,
@@ -485,11 +515,12 @@ const server = http.createServer(async (req, res) => {
       const text = String(b.comment || '').slice(0, 8000).trim();
       if (!slack.allowShare()) return json(res, 429, { error: 'too many Slack posts in a minute' });
       const payload = {
-        repo: sessions.get(pv.sessionKey)?.repo || '',
+        repo: sessions.get(connectedSession())?.repo || '',
         comment: text,
         page: b.page || {},
         anchor: b.anchor || {},
         console: b.console || [],
+        file: fileFor(b.page?.url),
       };
       try {
         const out = await slack.share({ dest: b.dest || {}, payload, shot: decodeShot(b.screenshot) });
@@ -504,7 +535,8 @@ const server = http.createServer(async (req, res) => {
       const [, , previewId, ...rest] = p.split('/');
       const pv = previews.get(previewId);
       // A person is looking at this in a browser, so explain it rather than return raw JSON.
-      if (!pv || pv.external) return html(res, 404, gonePage(previewId));
+      // An origin's record names no file, so there is nothing here for it to serve.
+      if (!pv?.entry) return html(res, 404, gonePage(previewId));
       // Relative asset URLs only resolve under the id with its trailing slash.
       if (!rest.length) return send(res, 301, 'text/plain; charset=utf-8', '', { location: `/p/${previewId}/` });
       const rel = decodeSegments(rest);
@@ -576,12 +608,13 @@ const server = http.createServer(async (req, res) => {
       if (!isExtension(req.headers.origin)) {
         return json(res, 403, { error: 'only the extension may send a comment' });
       }
-      // The monitor may not have re-registered yet after a daemon restart. The session process
-      // being alive is enough - the event lands in the replay buffer and is delivered on reconnect.
-      if (!pidAlive(pv.sessionPid) && !sessions.has(pv.sessionKey)) {
-        return json(res, 409, { error: 'the Claude session that opened this preview has ended' });
+      // Where this comment goes, asked now rather than when the page was first seen: the session
+      // that ran /connect last. The record only said which page it came from.
+      const key = connectedSession();
+      if (!key) {
+        return json(res, 409, { error: 'no Claude session is connected - run /connect' });
       }
-      if (!listening(pv.sessionKey)) {
+      if (!listening(key)) {
         return json(res, 409, {
           error: 'no Claude session is listening - run /connect in the session that should receive comments',
         });
@@ -590,7 +623,7 @@ const server = http.createServer(async (req, res) => {
       if (!text) return json(res, 400, { error: 'empty comment' });
       // Last of the checks that cost nothing, and before the first thing that does: a refused
       // comment consumes no comment number, no sequence number and no disk.
-      if (!allowComment(pv.sessionKey)) {
+      if (!allowComment(key)) {
         return json(res, 429, { error: 'too many comments in a minute - wait a moment and send it again' });
       }
 
@@ -600,16 +633,15 @@ const server = http.createServer(async (req, res) => {
       const n = store.next(b.previewId, page, b.after);
       const at = ++seq;
       let shot = null;
-      // Reduced to the two fields the overlay sends, because `bridge` below is the daemon's own
-      // word about its own disk and a page must not be able to put it there: /comment is called
-      // from the page world, and a comment that blamed the bridge for a failure that never
-      // happened would send someone to debug the one component that did its job.
-      let capture = b.capture ? {
-        extension: Boolean(b.capture.extension),
-        error: b.capture.error ? String(b.capture.error).slice(0, 300) : undefined,
-      } : undefined;
+      // Reduced to the one field the overlay sends, because `bridge` below is the daemon's own
+      // word about its own disk and nothing upstream may put it there: this route is the
+      // extension's alone, but a comment that blamed the bridge for a failure that never happened
+      // would still send someone to debug the one component that did its job.
+      let capture = b.capture?.error
+        ? { error: String(b.capture.error).slice(0, 300) }
+        : undefined;
       try {
-        shot = store.writeShot(pv.sessionKey, b.previewId, at, b.screenshot);
+        shot = store.writeShot(key, b.previewId, at, b.screenshot);
       } catch (e) {
         // The comment is the valuable thing; the picture is a nicety. A scratch directory the OS
         // cleaned out, a full disk, a mode we cannot write to - none of them is a reason to refuse
@@ -624,11 +656,12 @@ const server = http.createServer(async (req, res) => {
       }
       const payload = {
         seq: at, n, previewId: b.previewId, ts: new Date().toISOString(),
-        repo: sessions.get(pv.sessionKey)?.repo || '', target: pv.target,
+        repo: sessions.get(key)?.repo || '', target: pv.target,
         comment: text, page: b.page || {}, anchor: b.anchor || {}, console: b.console || [], shot,
         capture: shot ? undefined : capture,
+        file: fileFor(b.page?.url),
       };
-      broadcast(pv.sessionKey, payload);
+      broadcast(key, payload);
       saveState();
       return json(res, 200, { ok: true, n, shot: Boolean(shot) });
     }

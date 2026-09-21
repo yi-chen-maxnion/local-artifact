@@ -57,7 +57,7 @@ own pages, but nothing can comment on them: what stops is everything the extensi
 | command | what it does |
 |---|---|
 | `/connect` | set this session up as the one the browser reports to; takes no argument, opens nothing, starts the bridge if needed |
-| `/comments` | bridge status, which session owns the browser, bound origins, screenshot count |
+| `/comments` | bridge status, which session owns the browser, the origins and files it has ids for, screenshot count |
 | `/slack [login\|logout\|status]` | connect Slack, so a comment can be posted to a channel or a person instead |
 
 **The session owns the browser, not a URL.** That is why `/connect` takes no target: run it once
@@ -196,10 +196,10 @@ page (overlay.js)                    bridge daemon 127.0.0.1:4517           clau
                                                         (as you, with your own token)
 ```
 
-- **`/connect` claims the browser for this session**, and each origin it then resolves gets a
-  `previewId` — one per origin, one per file, reused so the pins already on a page are kept. That
-  id is the routing key: comments from that page reach this session and no other. Two sessions in
-  two repos never cross-talk.
+- **`/connect` points the browser at this session**, and each origin it then resolves gets a
+  `previewId` — one per origin, one per file, reused so the pins already on a page are kept. The id
+  names the page, not a session: it outlives every session that uses it, and where a comment goes
+  is read from the session that ran `/connect` last, at the moment the comment arrives.
 - **The session key is the `claude` ancestor PID**, which the monitor and `/connect` both derive,
   so they always agree.
 - **The monitor is declared, not asked for**: `monitors/monitors.json` arms it the first time

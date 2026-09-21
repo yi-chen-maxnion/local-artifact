@@ -25,16 +25,14 @@ CORS headers, and so is anything a browser marks as coming from a web context th
 token is gone entirely: there is nothing in a URL for the bridge to read, so every tab on an
 origin is bound the same way, and a URL pasted anywhere carries no routing of ours with it.
 
-With two or more sessions live, an unclaimed origin goes to whichever ran `/connect` most
-recently. An origin claimed *explicitly* — by a `POST /preview` naming it as a target — stays with
-the session that claimed it, and where two sessions have claimed the same origin the later claim
-wins, for the same reason: the most recent setup gesture is the one the user just made. It reverts
-to the earlier session if the later one ends, since that session claimed the origin explicitly
-too. Nothing in the CLI sends such a claim today — the `/connect` command posts to `POST /connect`,
-which names no origin — so in practice every origin is unclaimed and follows the most recent setup.
-When the session that owns the browser ends, it passes to the session that registered most
-recently. The corner button's tooltip and the compose panel both name the repo they are sending
-to, so this is visible rather than guessed, and `/comments` prints it.
+With two or more sessions live, every origin goes to whichever ran `/connect` most recently, and
+that is asked when the comment arrives rather than when the page was first seen. Nothing a page
+did claims it for a session — not being opened by name, not being served by the bridge — because
+a record here is an id for pins and comment numbers and carries no session at all. One rule, with
+no second one to reason about: the last setup gesture is the one the user just made. When the
+session that owns the browser ends, it passes to the session that registered most recently. The
+corner button's tooltip and the compose panel both name the repo they are sending to, so this is
+visible rather than guessed, and `/comments` prints it.
 
 **The toolbar icon opens a menu of two switches**: this site on or off, and whether pins show
 outside comment mode. The icon used to toggle the origin on a bare click, which gave the one
@@ -148,9 +146,13 @@ second route is gone, and the bridge refuses a direct post from any page at all.
 
 The id a page's markers are stored under (`cc-pins-<previewId>` in `localStorage`) used to be
 minted fresh every time a target was opened, which meant opening the same app twice silently
-orphaned every pin. Ids are now created once per (session, origin) — and per (session, file) for the pages
-the bridge serves — and reused. Ids from the older, per-target format are given their origin when
-the state is loaded, so nothing already on a page is lost.
+orphaned every pin. Ids are now created once per origin — and once per file for the pages the
+bridge serves — and reused by every session. A record carries no session, so the browser passing
+from one session to another leaves every pin where it was; what changes is only where the next
+comment goes. Nothing drops the records any more, so the state file keeps the two hundred most
+recently used and lets the rest go. Ids from the older, per-target format are given their origin
+when the state is loaded, and the session fields they carried are dropped there, so nothing
+already on a page is lost.
 
 **Comments are numbered per page, not per origin.** Markers are only ever drawn on the page they
 were left on, so an origin-wide counter meant walking to a second route of the same app and

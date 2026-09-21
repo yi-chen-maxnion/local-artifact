@@ -36,6 +36,26 @@ test('says when the picture was taken but the bridge could not keep it', () => {
   assert.doesNotMatch(out, /extension/);
 });
 
+/**
+ * A page the bridge served. Its URL is a loopback address with an id in it, and the file behind
+ * it is the thing the session has to open - so the path goes above the page, in the same column
+ * as every other key.
+ */
+test('names the file when the page is one the bridge served', () => {
+  const out = fmt({
+    ...base,
+    page: { url: 'http://127.0.0.1:4517/p/a1b2c3d4/' },
+    file: '/Users/x/repo/report.html',
+    anchor: { kind: 'element', selector: 'h1' },
+  });
+  assert.match(out, /^file {4}\/Users\/x\/repo\/report\.html$/m);
+  // Above the page line, and the page itself is still there.
+  assert.ok(out.indexOf('\nfile    ') < out.indexOf('\npage    '));
+  assert.match(out, /^page {4}http:\/\/127\.0\.0\.1:4517\/p\/a1b2c3d4\/$/m);
+  // A comment from anywhere else has no file behind it and gets no line.
+  assert.doesNotMatch(fmt({ ...base, anchor: {} }), /^file/m);
+});
+
 test('renders each anchor kind', () => {
   const header = fmt({ ...base, anchor: {} }).split('\n')[0];
   assert.equal(header, '[ui-comment #3 · web · abcdef]');
@@ -71,6 +91,24 @@ test('the Slack message opens with the comment and the page it is about', () => 
   assert.equal(gap, '');
   // The whole URL, hash and all: it is the address the reader is meant to open.
   assert.equal(url, '🔗  <http://localhost:5173/a#/route>');
+});
+
+/**
+ * The same comment on a page this machine served. `http://127.0.0.1:4517/p/…` opens nothing for
+ * anyone in the channel and the absolute path is a corner of someone else's disk, so what the
+ * message carries is the name of the file - and no link at all.
+ */
+test('a served file is named rather than linked', () => {
+  const out = slackMessage({
+    ...shared,
+    page: { ...shared.page, url: 'http://127.0.0.1:4517/p/a1b2c3d4/' },
+    file: '/Users/x/repo/report.html',
+  });
+  assert.match(out, /^📄 {2}report\.html$/m);
+  assert.ok(!out.includes('🔗'), 'no link to a loopback address');
+  assert.ok(!out.includes('/Users/x'), 'no path only this machine has, not even in the block');
+  // The block still names it, so whoever pastes it knows what page the anchor is on.
+  assert.match(out, /^file {4}report\.html$/m);
 });
 
 test('a comment is optional, and several lines are all quoted', () => {

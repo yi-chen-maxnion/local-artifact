@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fmt } from '../lib/format.mjs';
 import { ROOT, comment, connect, freePort, listen, preview, register, resolveOrigin, startBridge } from './helpers.mjs';
 
 describe('bridge', () => {
@@ -180,6 +181,47 @@ describe('bridge', () => {
       const ext = { headers: { origin: 'chrome-extension://abc' } };
       assert.equal((await comment(bridge, previewId, ext)).status, 200);
     });
+
+    /**
+     * A comment left on a page the bridge served names a loopback URL with an id in it, which
+     * says nothing about what to go and edit. The daemon holds the one thing that does - the path
+     * the file was opened from - so it puts it in the notification rather than leaving a session
+     * to work it back out of an id.
+     */
+    test('from a page this bridge serves carries the file it came from', async () => {
+      const file = path.join(files, 'design.html');
+      fs.writeFileSync(file, '<h1>hi</h1>');
+      const { previewId } = await preview(bridge, key, file);
+      // Its own stream: the comments above are still sitting unread on the suite's monitor.
+      const monitor = await listen(bridge, key);
+      try {
+        const res = await comment(bridge, previewId, {
+          comment: 'this heading', page: { url: `${bridge.origin}/p/${previewId}/` },
+        });
+        assert.equal(res.status, 200);
+        const event = await monitor.next();
+        assert.equal(event.file, file);
+        assert.match(fmt(event), new RegExp(`^file {4}${file}$`, 'm'));
+      } finally {
+        await monitor.close();
+      }
+    });
+
+    // Any other page is a page on the web, and there is no file behind it to name.
+    test('from anywhere else carries no file', async () => {
+      const { previewId } = await preview(bridge, key, 'http://localhost:5173/');
+      const monitor = await listen(bridge, key);
+      try {
+        // A path that looks like a served one, on an origin that is not this bridge.
+        const page = { url: `http://elsewhere.example/p/${previewId}/` };
+        assert.equal((await comment(bridge, previewId, { comment: 'nope', page })).status, 200);
+        const event = await monitor.next();
+        assert.equal(event.file, undefined);
+        assert.doesNotMatch(fmt(event), /^file/m);
+      } finally {
+        await monitor.close();
+      }
+    });
   });
 
   describe('/resolve', () => {
@@ -237,53 +279,12 @@ test('previews, counters and seq survive a daemon restart', async () => {
 });
 
 /**
- * Two sessions, one dev server. Both opened it by name (`POST /preview`), so both claims are
- * explicit and the tie-break is the one the user can see: the most recent gesture owns the browser.
+ * The id an origin is known by belongs to the origin, not to a session: it is the namespace the
+ * page's pins and comment numbers live in, and the browser passing from one session to another
+ * must not orphan a single one of them. What moves is where the comments go, which is asked of
+ * `primaryKey` when a comment arrives and never of the record.
  */
-describe('an origin two sessions have opened', () => {
-  const site = 'http://localhost:5199';
-  let bridge;
-  let keyA;
-  let keyB;
-
-  before(async () => {
-    bridge = await startBridge();
-    keyA = await register(bridge, `p${process.pid}`);
-    // A second session: the key only has to be a valid one and the pid only has to be alive.
-    keyB = await register(bridge, `p${process.pid}1`);
-  });
-  after(() => bridge.stop());
-
-  // Claims are ordered by the millisecond they were made, so two of them need different ones.
-  // Named for what it is - an explicit open - since the setup gesture with no target is `connect`.
-  const openedBy = async (key) => {
-    await new Promise((r) => setTimeout(r, 2));
-    return (await preview(bridge, key, `${site}/`)).previewId;
-  };
-
-  const resolved = async () => {
-    const res = await resolveOrigin(bridge, site);
-    assert.equal(res.status, 200);
-    return (await res.json()).previewId;
-  };
-
-  test('belongs to whichever session opened it last', async () => {
-    const a = await openedBy(keyA);
-    const b = await openedBy(keyB);
-    assert.notEqual(a, b); // one preview per (session, origin)
-    assert.equal(await resolved(), b);
-
-    // And it goes back when the first session opens it again - the same preview, re-claimed.
-    assert.equal(await openedBy(keyA), a);
-    assert.equal(await resolved(), a);
-  });
-});
-
-/**
- * An origin nobody ever opened - every origin, now that `/connect` names none. It follows the
- * session that connected last, which is the whole of what "any page you open" means.
- */
-describe('an origin no session has opened', () => {
+describe('an origin, as the browser passes between sessions', () => {
   const site = 'http://localhost:5299';
   let bridge;
   let keyA;
@@ -295,7 +296,10 @@ describe('an origin no session has opened', () => {
     // Something to be alive and then not; it exits on its own if this test ever fails to kill it.
     sessionA = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
     keyA = await register(bridge, `p${sessionA.pid}`, sessionA.pid);
-    keyB = await register(bridge, `p${process.pid}`);
+    await bridge.request('/register', {
+      json: { key: `p${process.pid}`, pid: process.pid, cwd: '/tmp/other', repo: 'other' },
+    });
+    keyB = `p${process.pid}`;
   });
   after(async () => {
     sessionA.kill('SIGKILL');
@@ -305,23 +309,32 @@ describe('an origin no session has opened', () => {
   const resolved = async () => {
     const res = await resolveOrigin(bridge, site);
     assert.equal(res.status, 200);
-    return (await res.json()).previewId;
+    return res.json();
   };
 
-  test('follows the session that claimed the browser last, and outlives the one before it', async () => {
+  test('keeps its id, while the repo it reports follows whoever connected last', async () => {
     await connect(bridge, keyA);
-    const a = await resolved();
+    const first = await resolved();
+    assert.ok(first.previewId);
+    assert.equal(first.repo, 'repo');
 
+    // The browser changes hands. The pins on this origin are filed under `first.previewId`, so an
+    // id minted for the new session would silently orphan every one of them.
     await connect(bridge, keyB);
-    const b = await resolved();
-    assert.notEqual(a, b); // one preview per (session, origin), so this is B's own
+    const second = await resolved();
+    assert.equal(second.previewId, first.previewId);
+    assert.equal(second.repo, 'other'); // the session a comment would reach now
 
-    // A ends. B is still live and still holds the browser, so the page it resolves does not move -
-    // and B's preview id is the same one, since nothing re-minted it.
+    // A ends. B holds the browser and the record never belonged to A, so nothing moves and
+    // nothing is pruned.
     await new Promise((resolve) => { sessionA.once('exit', resolve); sessionA.kill('SIGKILL'); });
-    assert.equal(await resolved(), b);
+    const third = await resolved();
+    assert.equal(third.previewId, first.previewId);
+    assert.equal(third.repo, 'other');
     const { previews } = await (await bridge.request('/health')).json();
-    assert.equal(previews.some((v) => v.sessionKey === keyA), false); // pruned with its session
+    const record = previews.find((v) => v.id === first.previewId);
+    // No session on it at all - an origin, the target it was minted from, and its id.
+    assert.deepEqual(record, { id: first.previewId, target: site, origin: site });
   });
 });
 
@@ -383,6 +396,51 @@ describe('scripts/connect.mjs', () => {
     assert.equal(code, 2);
     assert.match(err, /^connect: \/connect takes no argument/);
     await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
+  });
+});
+
+/**
+ * No session holds the browser at all: the one that connected has ended and nothing took its
+ * place. The page is still open and its pins are still on it, so the id resolves - what is gone
+ * is anywhere to send a comment, and the answer has to name the gesture that fixes it.
+ */
+describe('a comment with nobody connected', () => {
+  let bridge;
+  let ended;
+  let previewId;
+
+  before(async () => {
+    bridge = await startBridge();
+    // A session that can end: the record it opens has to outlive it.
+    ended = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    const key = await register(bridge, `p${ended.pid}`, ended.pid);
+    ({ previewId } = await preview(bridge, key, 'http://localhost:7600/'));
+    await new Promise((resolve) => { ended.once('exit', resolve); ended.kill('SIGKILL'); });
+    await bridge.request('/health'); // which prunes, leaving nothing holding the browser
+  });
+  after(async () => {
+    ended.kill('SIGKILL');
+    await bridge.stop();
+  });
+
+  test('is refused, and the record it was left on is still there for the next session', async () => {
+    const res = await comment(bridge, previewId, { page: { url: 'http://localhost:7600/a' } });
+    assert.equal(res.status, 409);
+    assert.match((await res.json()).error, /^no Claude session is connected - run \/connect$/);
+
+    // The next session takes the browser, and the page's pins are still filed under the same id.
+    const mine = await register(bridge);
+    await connect(bridge, mine);
+    const monitor = await listen(bridge, mine);
+    try {
+      const sent = await comment(bridge, previewId, { page: { url: 'http://localhost:7600/a' } });
+      assert.equal(sent.status, 200);
+      const event = await monitor.next();
+      assert.equal(event.previewId, previewId);
+      assert.equal(event.repo, 'repo');
+    } finally {
+      await monitor.close();
+    }
   });
 });
 
@@ -481,14 +539,15 @@ describe('a screenshot the bridge cannot save', () => {
     }
   });
 
-  // `bridge` is the daemon's word about its own disk, and /comment is a route pages call.
-  test('a page cannot claim the bridge failed', async () => {
+  // `bridge` is the daemon's word about its own disk, and nothing upstream may put it there.
+  // `extension` went with the page world: every capture comes from the extension now, so a field
+  // saying so would only be a field that could lie.
+  test('nothing upstream can claim the bridge failed, or that it was the extension', async () => {
     const res = await send({ screenshot: null, capture: { bridge: true, extension: false, error: 'x' } });
     assert.equal(res.status, 200);
     const event = await delivered();
-    assert.equal(event.capture.bridge, undefined);
-    // What the overlay does send still arrives as it was.
-    assert.deepEqual(event.capture, { extension: false, error: 'x' });
+    // The reason is the whole of what is kept.
+    assert.deepEqual(event.capture, { error: 'x' });
   });
 });
 
@@ -502,12 +561,13 @@ describe('more comments in a minute than a session will take', () => {
   let a;
   let b;
 
-  /** A registered session with a real monitor on its stream and a preview of its own. */
+  /** A registered session with a real monitor on its stream and a page of its own. */
   const session = async (key, target) => {
     await register(bridge, key);
     const monitor = await listen(bridge, key);
     const { previewId } = await preview(bridge, key, target);
     return {
+      key,
       previewId,
       send: (text) => comment(bridge, previewId, { comment: text, page: { url: `${target}a` } }),
       next: monitor.next,
@@ -530,6 +590,7 @@ describe('more comments in a minute than a session will take', () => {
   });
 
   test('refuses the ones past it, and spends nothing on a refusal', async () => {
+    await connect(bridge, a.key); // the browser reports to A, so A's budget is what is spent
     assert.equal((await (await a.send('one')).json()).n, 1);
     assert.equal((await (await a.send('two')).json()).n, 2);
 
@@ -544,7 +605,9 @@ describe('more comments in a minute than a session will take', () => {
     assert.deepEqual([first.n, second.n], [1, 2]);
     assert.deepEqual([first.seq, second.seq], [1, 2]);
 
-    // Another session has its own budget: what is being protected is one session's attention.
+    // The browser passes to B, which has a budget of its own: what is being protected is one
+    // session's attention, and A having spent its own says nothing about B's.
+    await connect(bridge, b.key);
     const other = await b.send('mine');
     assert.equal(other.status, 200);
     const third = await b.next();
@@ -583,6 +646,9 @@ describe('a monitor that has never printed a comment', () => {
     otherSentinel = await listen(bridge, other);
     ({ previewId } = await preview(bridge, key, 'http://localhost:7500/'));
     ({ previewId: otherPreview } = await preview(bridge, other, 'http://localhost:7501/'));
+    // Opening a target is a setup gesture, so the second one left the browser with `other`.
+    // Everything below is about this session's stream, so it takes the browser back.
+    await connect(bridge, key);
   });
   after(async () => {
     await sentinel.close();
@@ -629,7 +695,11 @@ describe('a monitor that has never printed a comment', () => {
 
   test('from=0 replays this session, and only this session', async () => {
     assert.equal((await send('two')).status, 200);
+    // A comment for the other session, which means the browser is that session's for a moment:
+    // where a comment goes is read from whoever connected last, never from the page it came from.
+    await connect(bridge, other);
     assert.equal((await send('theirs', otherPreview)).status, 200);
+    await connect(bridge, key);
     const all = await listen(bridge, key, { from: 0 });
     assert.deepEqual(await texts(all, 2), ['one', 'two']);
     assert.ok(await silent(all), 'the other session\'s comment was replayed into this one');

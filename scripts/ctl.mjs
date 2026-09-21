@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import path from 'node:path';
 import { ORIGIN, bridge, ensureDaemon, health, openInBrowser, resolveSession, scratchDir, sleep } from '../lib/common.mjs';
 
 const cmd = process.argv[2] || 'status';
@@ -85,7 +86,6 @@ if (!h.sessions) {
   console.log('The daemon idle-exits on its own 5 minutes after the last session ends.');
   console.log(`To stop it now: kill ${h.pid}`);
 } else {
-  const mine = h.previews.filter((p) => p.sessionKey === session.key);
   console.log(`bridge     ${ORIGIN}  (pid ${h.pid})`);
   console.log(`session    ${session.key || '(no claude process found)'}  ${session.repo}  ${session.cwd}`);
   const me = h.sessions.find((s) => s.key === session.key);
@@ -97,14 +97,16 @@ if (!h.sessions) {
   console.log(`browser    ${h.primary
     ? (h.primary === session.key ? 'this session' : `${primary?.repo || h.primary} - run /connect here to take it over`)
     : 'not connected - run /connect'}`);
-  const origins = mine.filter((p) => p.origin);
+  // Ids, not ownership: a record is the namespace a page's pins and comment numbers live in,
+  // and it belongs to no session - whoever holds the browser above receives their comments.
+  const origins = h.previews.filter((p) => p.origin);
   if (origins.length) {
-    console.log(`origins    ${origins.length} bound to this session:`);
+    console.log(`origins    ${origins.length} with ids:`);
     for (const p of origins) console.log(`  ${p.id.slice(0, 6)}  ${p.origin}`);
   }
-  const files = mine.filter((p) => !p.origin);
-  console.log(`previews   ${files.length} for this session${files.length ? ':' : ''}`);
-  for (const p of files) console.log(`  ${p.id.slice(0, 6)}  ${p.kind.padEnd(9)}${p.target}`);
+  const files = h.previews.filter((p) => !p.origin);
+  console.log(`previews   ${files.length} file${files.length === 1 ? '' : 's'}${files.length ? ':' : ''}`);
+  for (const p of files) console.log(`  ${p.id.slice(0, 6)}  ${String(p.kind).padEnd(9)}${path.basename(p.target)}`);
   console.log(slackLine(h.slack));
   if (session.key) {
     const dir = scratchDir(session.key);
