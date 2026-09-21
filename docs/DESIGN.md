@@ -6,8 +6,10 @@ change does not quietly reintroduce a problem that was already solved once.
 
 ## Which pages get the button
 
-**The session owns the browser, not a URL.** Run `/preview` once — that is the setup gesture —
-and from then on every page you open carries the comment button and reports back to that session:
+**The session owns the browser, not a URL.** Run `/preview` once — that is the setup gesture, and
+it is why the command takes no target at all: naming one URL is not what binds anything, and a URL
+the user could open themselves was an argument they had no reason to type. From then on every page
+they open carries the comment button and reports back to that session:
 a second tab, a link that opened one, a different route, a different port, and a deployed build
 at `https://…` as much as `http://localhost:5173`. Nothing has to be in the address bar.
 
@@ -24,11 +26,12 @@ still works and still wins — it is how one tab is pinned to a particular sessi
 are running.
 
 With two or more sessions live, an unclaimed origin goes to whichever ran `/preview` most
-recently, and an origin opened *explicitly* with `/preview` stays with the session that opened it.
-Where two sessions have both opened the same origin — two checkouts of one app on one dev server —
-the later `/preview` wins, for the same reason: the most recent setup gesture is the one the user
-just made. It reverts to the earlier session if the later one ends, since that session opened the
-origin explicitly too.
+recently. An origin claimed *explicitly* — by a `POST /preview` naming it as a target — stays with
+the session that claimed it, and where two sessions have claimed the same origin the later claim
+wins, for the same reason: the most recent setup gesture is the one the user just made. It reverts
+to the earlier session if the later one ends, since that session claimed the origin explicitly
+too. Nothing in the CLI sends such a claim today — `/preview` posts to `/claim`, which names no
+origin — so in practice every origin is unclaimed and follows the most recent setup.
 When the session that owns the browser ends, it passes to the session that registered most
 recently. The corner button's tooltip and the compose panel both name the repo they are sending
 to, so this is visible rather than guessed, and `/comments` prints it.

@@ -7,9 +7,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseFrame } from '../lib/sse.mjs';
 
-const ROOT = path.resolve(fileURLToPath(import.meta.url), '../..');
+export const ROOT = path.resolve(fileURLToPath(import.meta.url), '../..');
 
-const freePort = () => new Promise((resolve, reject) => {
+/** A port nothing is listening on - for a daemon of our own, or for a test that wants none. */
+export const freePort = () => new Promise((resolve, reject) => {
   const srv = net.createServer();
   srv.once('error', reject);
   srv.listen(0, '127.0.0.1', () => {
@@ -82,11 +83,31 @@ export async function startBridge({ tmp, port: fixedPort, env = {} } = {}) {
   return { port, origin, dir, stateDir, configDir, token, request, stop, child };
 }
 
-/** Registers a session owned by this test process, which is alive for as long as the test is. */
-export async function register(bridge, key = `p${process.pid}`) {
-  const res = await bridge.request('/register', { json: { key, pid: process.pid, cwd: '/tmp/repo', repo: 'repo' } });
+/**
+ * Registers a session owned by this test process, which is alive for as long as the test is -
+ * or by `pid`, for a test that needs a session it can end.
+ */
+export async function register(bridge, key = `p${process.pid}`, pid = process.pid) {
+  const res = await bridge.request('/register', { json: { key, pid, cwd: '/tmp/repo', repo: 'repo' } });
   if (!res.ok) throw new Error(`register ${res.status}`);
   return key;
+}
+
+/** The setup gesture with no target: `key` owns the browser from now on. */
+export async function claim(bridge, key) {
+  const res = await bridge.request('/claim', { json: { key } });
+  assert.equal(res.status, 200);
+  return res.json();
+}
+
+/**
+ * What the extension's service worker asks on every page load: whose session is this origin?
+ * The raw Response, since a miss - nothing set up, an id that is not live - is a 404 a test wants.
+ */
+export function resolveOrigin(bridge, origin) {
+  return bridge.request(`/resolve?origin=${encodeURIComponent(origin)}`, {
+    token: null, headers: { origin: 'chrome-extension://abc' },
+  });
 }
 
 /** Opens `target` for `key` and hands back the answer - `{ previewId, url, kind, ... }`. */

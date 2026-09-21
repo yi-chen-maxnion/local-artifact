@@ -32,7 +32,7 @@ const INSTANCE = shortId(6);
  * TOKEN_FILE once the port is ours.
  */
 const TOKEN = shortId(16);
-const CONTROL = new Set(['/register', '/preview', '/events']);
+const CONTROL = new Set(['/register', '/preview', '/claim', '/events']);
 const BUILD = codeBuild(ROOT);
 
 /**
@@ -253,6 +253,17 @@ function ownerOf(origin) {
   return sessions.has(primaryKey) ? primaryKey : null;
 }
 
+/**
+ * The setup gesture, whatever made it: from now on this session owns the browser.
+ *
+ * It claims no origin of its own - `ownerOf` falls back to it only for origins nobody opened
+ * explicitly, which is precisely the "any page you open" case the extension relies on.
+ */
+function claimBrowser(key) {
+  primaryKey = key;
+  saveState();
+}
+
 function pruneSessions() {
   let changed = false;
   for (const [key, s] of sessions) {
@@ -357,6 +368,18 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, previews: [...previews.values()].filter((v) => v.sessionKey === b.key).length });
     }
 
+    /**
+     * Setup with nothing to open: `/preview` without a target. With the extension installed that
+     * is all most sessions need, since every page already carries the button and only has to be
+     * told whose session it reports to.
+     */
+    if (p === '/claim' && req.method === 'POST') {
+      const b = await readBody(req);
+      if (!sessions.has(b.key)) return json(res, 409, { error: 'session not registered' });
+      claimBrowser(b.key);
+      return json(res, 200, { ok: true, primary: primaryKey });
+    }
+
     if (p === '/preview' && req.method === 'POST') {
       const b = await readBody(req);
       const s = sessions.get(b.key);
@@ -378,9 +401,8 @@ const server = http.createServer(async (req, res) => {
         });
       }
       found.pv.sessionPid = s.pid;
-      // Running /preview IS the setup gesture: it says which session the browser belongs to.
-      primaryKey = b.key;
-      saveState();
+      // Opening a target IS a setup gesture too: it says which session the browser belongs to.
+      claimBrowser(b.key);
       const { previewId, pv } = found;
       const open = pv.external
         ? previewHash(target, previewId)

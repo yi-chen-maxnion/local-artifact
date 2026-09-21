@@ -1,25 +1,19 @@
 #!/usr/bin/env node
 /**
- * /preview <path-or-url> - open a target in the browser bound to THIS session.
+ * /preview - make this session the one the browser sends comments to.
  *
- * The previewId it gets back is the routing key: comments from that page reach this
- * session and no other. This is also the only place the bridge daemon gets started.
+ * It takes no target. With the extension installed every page the user opens already carries the
+ * comment button; all it needs is to know whose session that page reports to, which is what the
+ * claim here says. This is also the only place the bridge daemon gets started.
  */
-import path from 'node:path';
-import { bridge, ensureDaemon, health, openInBrowser, resolveSession, sleep } from '../lib/common.mjs';
+import { bridge, ensureDaemon, health, resolveSession, sleep } from '../lib/common.mjs';
 
-const argv = process.argv.slice(2);
-const noOpen = argv.includes('--no-open');
-// Joined rather than just the first: the slash command passes its argument unquoted, so a path
-// with a space in it arrives as several.
-const target = argv.filter((a) => !a.startsWith('--')).join(' ');
-
-if (!target) {
-  console.error('usage: preview.mjs <file-or-url> [--no-open]');
-  console.error('');
-  console.error('  preview.mjs ./report.html            an HTML file, overlay injected by the bridge');
-  console.error('  preview.mjs ./spec.pdf               a PDF, wrapped so the overlay sits over it');
-  console.error('  preview.mjs http://localhost:5173    a dev server (needs the Chrome extension)');
+// Refused rather than ignored, and before anything is started: someone typing the old form is
+// asking for a target to open, and would otherwise be told only that setup succeeded.
+if (process.argv.length > 2) {
+  console.error('preview: takes no argument - it sets this session up, and nothing more.');
+  console.error('         With the extension installed, every page you then open in the browser');
+  console.error('         carries the comment button and reports back to this session.');
   process.exit(2);
 }
 
@@ -33,12 +27,9 @@ if (!session.key) {
 try {
   await ensureDaemon();
   await bridge('/register', { body: { key: session.key, pid: session.pid, cwd: session.cwd, repo: session.repo } });
-
-  const isUrl = /^https?:\/\//i.test(target);
-  const resolved = isUrl ? target : path.resolve(session.cwd, target);
-  const { previewId, url, kind, external } = await bridge('/preview', { body: { key: session.key, target: resolved } });
-
-  if (!noOpen) openInBrowser(url);
+  // The claim takes no origin, so every origin nobody opened explicitly falls to this session -
+  // which is what "any page you open" means.
+  await bridge('/claim', { body: { key: session.key } });
 
   // The monitor is armed by the host on skill invoke, not by us. If the arm trigger in
   // monitors.json ever stops matching this command's name, comments would vanish silently -
@@ -50,19 +41,15 @@ try {
     if (!monitorUp) await sleep(250);
   }
 
-  console.log(`preview ${previewId}  (${external ? 'external url' : kind})`);
-  console.log(`  target  ${resolved}`);
-  console.log(`  opened  ${url}`);
-  console.log(`  session ${session.key}${session.repo ? ` (${session.repo})` : ''}`);
+  console.log(`setup    session ${session.key}${session.repo ? ` (${session.repo})` : ''}`);
+  console.log('  browser this session - with the extension installed, ANY page you open now');
+  console.log('          carries the comment button and reports back here. The extension is');
+  console.log('          what puts it there, so install it if no button ever appears.');
+  // Last, because this is the line the slash command reads back to the user.
   console.log(`  monitor ${monitorUp ? 'listening' : 'NOT ATTACHED - comments will not reach this session'}`);
   if (!monitorUp) {
     console.log('          The plugin monitor arms on /preview. If this persists, the');
     console.log('          "when" trigger in monitors/monitors.json does not match this command.');
-  }
-  if (external) {
-    console.log('  browser this session - with the extension installed, ANY page you open now');
-    console.log('          carries the comment button and reports back here. Without it, only');
-    console.log('          this tab is bound; use the bookmarklet from README.md elsewhere.');
   }
 } catch (e) {
   console.error(`preview: ${e.message}`);

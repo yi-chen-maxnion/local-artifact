@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { comment, listen, preview, register, startBridge } from './helpers.mjs';
+import { ROOT, claim, comment, freePort, listen, preview, register, resolveOrigin, startBridge } from './helpers.mjs';
 
 describe('bridge', () => {
   let bridge;
@@ -19,7 +19,7 @@ describe('bridge', () => {
 
   describe('control routes', () => {
     test('refuse a caller without the token', async () => {
-      for (const route of ['/register', '/preview']) {
+      for (const route of ['/register', '/preview', '/claim']) {
         const res = await bridge.request(route, { json: { key, pid: process.pid }, token: null });
         assert.equal(res.status, 401, route);
       }
@@ -77,6 +77,19 @@ describe('bridge', () => {
         const res = await bridge.request('/register', { json: { key: 'p12', pid } });
         assert.equal(res.status, 400, String(pid));
       }
+    });
+  });
+
+  describe('/claim', () => {
+    // The claim says which session the browser reports to, so a key with no session behind it
+    // would point every page at nothing - refused rather than remembered for later.
+    test('refuses a session that never registered', async () => {
+      const res = await bridge.request('/claim', { json: { key: `p${process.pid}9` } });
+      assert.equal(res.status, 409);
+    });
+
+    test('names the session it made primary', async () => {
+      assert.deepEqual(await claim(bridge, key), { ok: true, primary: key });
     });
   });
 
@@ -233,28 +246,134 @@ describe('an origin two sessions have opened', () => {
   after(() => bridge.stop());
 
   // Claims are ordered by the millisecond they were made, so two of them need different ones.
-  const claim = async (key) => {
+  // Named for what it is - an explicit open - since the setup gesture with no target is `claim`.
+  const openedBy = async (key) => {
     await new Promise((r) => setTimeout(r, 2));
     return (await preview(bridge, key, `${site}/`)).previewId;
   };
 
   const resolved = async () => {
-    const res = await bridge.request(`/resolve?origin=${encodeURIComponent(site)}`, {
-      token: null, headers: { origin: 'chrome-extension://abc' },
-    });
+    const res = await resolveOrigin(bridge, site);
     assert.equal(res.status, 200);
     return (await res.json()).previewId;
   };
 
   test('belongs to whichever session opened it last', async () => {
-    const a = await claim(keyA);
-    const b = await claim(keyB);
+    const a = await openedBy(keyA);
+    const b = await openedBy(keyB);
     assert.notEqual(a, b); // one preview per (session, origin)
     assert.equal(await resolved(), b);
 
     // And it goes back when the first session opens it again - the same preview, re-claimed.
-    assert.equal(await claim(keyA), a);
+    assert.equal(await openedBy(keyA), a);
     assert.equal(await resolved(), a);
+  });
+});
+
+/**
+ * An origin nobody ever opened - every origin, now that `/preview` names none. It follows the
+ * session that set up last, which is the whole of what "any page you open" means.
+ */
+describe('an origin no session has opened', () => {
+  const site = 'http://localhost:5299';
+  let bridge;
+  let keyA;
+  let keyB;
+  let sessionA; // a real process, so ending it is a session actually ending
+
+  before(async () => {
+    bridge = await startBridge();
+    // Something to be alive and then not; it exits on its own if this test ever fails to kill it.
+    sessionA = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    keyA = await register(bridge, `p${sessionA.pid}`, sessionA.pid);
+    keyB = await register(bridge, `p${process.pid}`);
+  });
+  after(async () => {
+    sessionA.kill('SIGKILL');
+    await bridge.stop();
+  });
+
+  const resolved = async () => {
+    const res = await resolveOrigin(bridge, site);
+    assert.equal(res.status, 200);
+    return (await res.json()).previewId;
+  };
+
+  test('follows the session that claimed the browser last, and outlives the one before it', async () => {
+    await claim(bridge, keyA);
+    const a = await resolved();
+
+    await claim(bridge, keyB);
+    const b = await resolved();
+    assert.notEqual(a, b); // one preview per (session, origin), so this is B's own
+
+    // A ends. B is still live and still holds the browser, so the page it resolves does not move -
+    // and B's preview id is the same one, since nothing re-minted it.
+    await new Promise((resolve) => { sessionA.once('exit', resolve); sessionA.kill('SIGKILL'); });
+    assert.equal(await resolved(), b);
+    const { previews } = await (await bridge.request('/health')).json();
+    assert.equal(previews.some((v) => v.sessionKey === keyA), false); // pruned with its session
+  });
+});
+
+/**
+ * The script end to end. Its session key is the pid of the nearest `claude` process, so it is
+ * given one: node under the name `claude`, the trick test/monitor.test.mjs uses for the same
+ * reason - `ps` prints the name a process was started under, which is all findClaudePid reads.
+ */
+describe('scripts/preview.mjs', () => {
+  const SCRIPT = path.join(ROOT, 'scripts', 'preview.mjs');
+  let bridge;
+
+  before(async () => { bridge = await startBridge(); });
+  after(() => bridge.stop());
+
+  /**
+   * The script, with everything it needs to find this daemon rather than the real one. `monitor`
+   * plays the one the host would have armed: a stream on the key only the child can work out, so
+   * it has to be opened once the pid is known and closed before the daemon is.
+   */
+  const run = (exe, args, port, { monitor = false } = {}) => new Promise((resolve, reject) => {
+    const child = spawn(exe, args, {
+      env: { ...process.env, LOCAL_ARTIFACT_PORT: String(port), TMPDIR: bridge.dir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    let stream = null;
+    child.stdout.on('data', (b) => { out += b; });
+    child.stderr.on('data', (b) => { err += b; });
+    if (monitor) child.once('spawn', () => listen(bridge, `p${child.pid}`).then((s) => { stream = s; }, reject));
+    child.on('exit', async (code) => {
+      await stream?.close();
+      resolve({ code, out, err, pid: child.pid });
+    });
+  });
+
+  test('claims the browser for its session and says the monitor is listening', async () => {
+    const dir = fs.mkdtempSync(path.join(bridge.dir, 'session-'));
+    const named = path.join(dir, 'claude');
+    fs.symlinkSync(process.execPath, named);
+
+    const { code, out, err, pid } = await run(named, [SCRIPT], bridge.port, { monitor: true });
+    assert.equal(err, '');
+    assert.equal(code, 0);
+    assert.match(out, new RegExp(`^setup {4}session p${pid} \\(`));
+    assert.match(out, /\n {2}monitor listening\n$/); // the line the slash command reads back
+    // From the state on disk, not /health: the script's own process is the session, and asking
+    // /health after it has exited prunes the very session whose claim is being checked.
+    const state = JSON.parse(fs.readFileSync(path.join(bridge.stateDir, `previews-${bridge.port}.json`), 'utf8'));
+    assert.equal(state.primaryKey, `p${pid}`);
+  });
+
+  test('refuses an argument without starting anything', async () => {
+    // A port with no daemon on it: if the argument check did not come first, ensureDaemon would
+    // start one here rather than refuse.
+    const port = await freePort();
+    const { code, err } = await run(process.execPath, [SCRIPT, './report.html'], port);
+    assert.equal(code, 2);
+    assert.match(err, /^preview: takes no argument/);
+    await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
   });
 });
 

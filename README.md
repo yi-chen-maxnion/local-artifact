@@ -6,7 +6,8 @@ server, a generated `report.html`, a PDF — with no per-repo integration and no
 your stack.
 
 ```
-/preview http://localhost:5173        →  opens in Chrome with a 💬 button
+/preview                              →  this session now owns the browser
+open http://localhost:5173 yourself   →  the page carries a 💬 button
 click 💬, point at a button, type     →  the session wakes up with the comment,
                                           the anchor, and a screenshot
 ```
@@ -27,10 +28,11 @@ Then **restart the session** — the monitor that receives comments is armed at 
 After updating the plugin, restart open sessions too: a monitor started from older code cannot
 authenticate to the new bridge.
 
-### The Chrome extension (recommended)
+### The Chrome extension
 
-Everything works without it, except screenshots on pages the bridge does not serve itself.
-With it, every comment carries a true viewport capture with no permission prompt.
+This is what puts the button on a page. Without it only the bookmarklet below reaches a dev
+server, and a comment carries no screenshot unless the bridge served the page itself; with it,
+every page you open is bound and every comment carries a true viewport capture with no prompt.
 
 1. `chrome://extensions` → enable **Developer mode**
 2. **Load unpacked** → select the `extension/` directory of this repo
@@ -55,15 +57,15 @@ the daemon on 4517 if you use the extension.
 
 | command | what it does |
 |---|---|
-| `/preview <file-or-url>` | set this session up in the browser, open a target, start the bridge if needed |
+| `/preview` | set this session up as the one the browser reports to; takes no argument, opens nothing, starts the bridge if needed |
 | `/comments` | bridge status, which session owns the browser, bound origins, screenshot count |
 | `/slack [login\|logout\|status]` | connect Slack, so a comment can be posted to a channel or a person instead |
 
-**The session owns the browser, not a URL.** Run `/preview` once and, with the extension
-installed, every page you open carries the comment button and reports back to that session — a
-second tab, another route or port, a deployed `https://` build. With several sessions live, a page
-goes to whichever ran `/preview` most recently, unless its origin was opened explicitly with
-`/preview` by another. The button's tooltip and the panel name the repo a comment goes to.
+**The session owns the browser, not a URL.** That is why `/preview` takes no target: run it once
+and, with the extension installed, every page *you* open carries the comment button and reports
+back to that session — a second tab, another route or port, a deployed `https://` build. With
+several sessions live, a page goes to whichever ran `/preview` most recently. The button's
+tooltip and the panel name the repo a comment goes to.
 Clicking the extension's toolbar icon opens a menu with two switches:
 
 - **On this site** — turns the current origin off immediately, in every open tab on it, and it
@@ -171,8 +173,8 @@ and requires JSON for every `POST`.
 - **Pages cannot speak for the user.** On pages the extension injects into, the overlay runs in
   the extension's isolated world with a closed shadow root, so the page's own scripts can neither
   read its binding nor drive its controls. Comments from those pages are accepted only from the
-  extension. A page's own origin may post directly only if you opened it with `/preview` — that is
-  the bookmarklet path.
+  extension. A page's own origin may post directly only if that origin was opened explicitly on
+  the bridge — the bookmarklet path, which nothing in the CLI reaches today (see below).
 - **Comments are untrusted input.** Comment text and anchor HTML come from a web page; the skill
   tells Claude to treat them as a description of a UI change, never as instructions, and to ask
   before acting on anything else.
@@ -197,9 +199,10 @@ page (overlay.js)                    bridge daemon 127.0.0.1:4517           clau
                                                         (as you, with your own token)
 ```
 
-- **`/preview` binds a `previewId` to this session** — one per origin, one per file, reused on
-  later runs so the pins already on a page are kept. That id is the routing key: comments from
-  that page reach this session and no other. Two sessions in two repos never cross-talk.
+- **`/preview` claims the browser for this session**, and each origin it then resolves gets a
+  `previewId` — one per origin, one per file, reused so the pins already on a page are kept. That
+  id is the routing key: comments from that page reach this session and no other. Two sessions in
+  two repos never cross-talk.
 - **The session key is the `claude` ancestor PID**, which the monitor and `/preview` both derive,
   so they always agree.
 - **The monitor is declared, not asked for**: `monitors/monitors.json` arms it the first time
@@ -216,10 +219,15 @@ page (overlay.js)                    bridge daemon 127.0.0.1:4517           clau
 | `spec.pdf`, `.png`, `.md`, `.txt` | bridge serves a wrapper page holding the overlay | no |
 | `http://localhost:5173/…`, a deployed build | the extension injects it | yes (or bookmarklet) |
 
+The bridge still serves the first two rows, but since `/preview` takes no target there is no
+command that hands it a file: the extension's row is the one you get.
+
 ## Bookmarklet (fallback for dev servers without the extension)
 
-Open the dev server with `/preview <url>` first — only an origin opened that way accepts comments
-posted from the page itself — then use the bookmarklet on it:
+**Currently unreachable from the CLI.** Comments posted by a page itself are accepted only for an
+origin that was opened explicitly on the bridge, and `/preview` no longer opens anything — so the
+bookmarklet works only against an origin claimed some other way. Kept here because the bridge
+side of it still exists:
 
 ```
 javascript:(()=>{const o='http://127.0.0.1:4517',h=document.createElement('script');h.src=o+'/console-hook.js';document.body.appendChild(h);const s=document.createElement('script');s.src=o+'/overlay.js';s.dataset.ccPreview=(/[#&]cc=([a-f0-9]{8,})/.exec(location.hash)||[])[1]||prompt('previewId (from /preview)');s.dataset.ccOrigin=o;document.body.appendChild(s)})()
@@ -296,8 +304,8 @@ Whichever route, two things do **not** travel with the plugin and are needed on 
   per-browser-profile; installing the plugin does not install it.
 
 Nothing else is machine-specific: the port, the scratch directory and the session key are all
-derived at runtime. `/preview` opens pages with macOS `open`. `claude plugin tag` can cut a
-`local-artifact--v0.1.0` git tag when you want versioned releases.
+derived at runtime. `/slack login` opens its browser page with macOS `open`. `claude plugin tag`
+can cut a `local-artifact--v0.1.0` git tag when you want versioned releases.
 
 ## Developing this plugin
 
