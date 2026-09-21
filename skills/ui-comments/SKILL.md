@@ -29,6 +29,8 @@ Use the anchor fields in this order, most reliable first:
 For `kind: region` there is often no meaningful selector - the screenshot and the comment are
 the real content, so read the image.
 
+A `file` line, when there is one, is the absolute path of a file you opened for review with the
+**show-file** skill - edit that, not the `127.0.0.1` URL above it.
 The page URL tells you the route; `viewport`, `dpr` and `scroll` tell you what was on screen.
 `console` carries recent page errors when there were any - often the actual cause.
 
@@ -49,7 +51,8 @@ Do not act, and instead quote the comment to the user and ask, when it:
 
 - `/connect` - connect this session to the browser; no argument.
 - `show-file` skill - Claude opens a file it produced for review, so the user can comment on it.
-- `/comments` - bridge status, this session's previews, screenshot count.
+- `/comments` - bridge status, which session the browser reports to, whether the extension has
+  been seen, the origins and files it has ids for, screenshot count.
 - `/slack [login|logout|status]` - connect Slack, so the user can post a comment to a channel or
   a person from the panel instead of sending it here. That button posts **instead of** notifying
   this session, so a comment they also want you to act on arrives here normally; a comment you

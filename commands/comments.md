@@ -1,5 +1,5 @@
 ---
-description: Show the local comment bridge status and this session's open previews
+description: Show the local comment bridge status - who the browser reports to, and the pages it has ids for
 argument-hint: "[status]"
 ---
 
@@ -10,8 +10,15 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.mjs" status
 ```
 
 Relay it plainly. If the bridge is not running, say that `/connect` starts it.
-The `browser` line says which session an otherwise unbound page goes to; if it names another
-session, running `/connect` here takes it over.
+The `browser` line says which session every comment goes to, whatever page it was left on; if it
+names another session, running `/connect` here takes it over.
+The `extension` line says whether anything can put the comment button on a page at all. Relay it
+whenever it is not `seen`: `NOT SEEN` means the Chrome extension has never reached the bridge, so
+no page carries the button and nothing can be sent - tell the user to install it from the path the
+line prints. `last seen … ago` means one reached it once: open a page in Chrome, and reload the
+extension at `chrome://extensions` if no button appears.
+The `origins` and `previews` lists are ids for pins and comment numbers, one per origin and one
+per file Claude has opened. They belong to no session and outlive the ones that used them.
 If `monitor` says NOT registered, the plugin monitor never armed — the session needs a restart,
 or the `when` trigger in `monitors/monitors.json` does not match `local-artifact:connect`.
 If the bridge is running but `did not accept the control token`, its token file was removed;

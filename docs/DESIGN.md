@@ -6,6 +6,19 @@ change does not quietly reintroduce a problem that was already solved once.
 
 ## Which pages get the button
 
+**Every page, and only through the extension.** There is exactly one way the overlay reaches a
+page: the extension's service worker asks the bridge `GET /resolve?origin=…` on each page load
+and, if a session is connected, injects `__ccConfig` and `overlay.js` into its own isolated world
+(and `console-hook.js` into the page's world, which is where the page's console is). Nothing else
+injects anything — not the bridge into the files it serves, not a loader the page runs itself —
+so with no extension installed there is no button anywhere and no comment can be sent at all.
+
+That is a hard requirement rather than a degraded mode, so every entry point says so instead of
+doing less: `/connect` prints the one `extension` line `lib/format.mjs` builds and exits `3` when
+nothing has ever been seen, `scripts/open.mjs` refuses on the same rung, `/comments` prints the
+same line, and the toolbar menu names the session the browser reports to. See *No extension*
+under **When a comment does not arrive**.
+
 **The session owns the browser, not a URL.** Run `/connect` once — that is the setup gesture, and
 it is why the command takes no target at all: naming one URL is not what binds anything, and a URL
 the user could open themselves was an argument they had no reason to type. From then on every page
@@ -13,30 +26,36 @@ they open carries the comment button and reports back to that session:
 a second tab, a link that opened one, a different route, a different port, and a deployed build
 at `https://…` as much as `http://localhost:5173`. Nothing has to be in the address bar.
 
-It used to be the other way round. `/connect` minted a token, put it in the URL as `#cc=…`, and
-the extension read it at `document_start` and cached it in `sessionStorage` for that tab's life.
-So the binding was a *tab*: open the same app in a new tab and there was no overlay at all, and a
-deployed build was out of reach entirely. Now the extension's service worker asks the bridge
-`GET /resolve?origin=…` on each page load, and the bridge answers with the session that owns it.
+It used to be the other way round. `/connect` minted a token, put it in the URL's hash, and the
+extension read it at `document_start` and cached it in `sessionStorage` for that tab's life. So
+the binding was a *tab*: open the same app in a new tab and there was no overlay at all, and a
+deployed build was out of reach entirely. The token is gone entirely — there is nothing in a URL
+for the bridge to read, so every tab on an origin is bound the same way, and a URL pasted anywhere
+carries no routing of ours with it.
 
 Only the extension may ask. A request carrying a web `Origin` is refused outright and never gets
 CORS headers, and so is anything a browser marks as coming from a web context through
-`Sec-Fetch-Site` — an `<img>` pointed at the bridge, or a page the bridge itself serves. The
-token is gone entirely: there is nothing in a URL for the bridge to read, so every tab on an
-origin is bound the same way, and a URL pasted anywhere carries no routing of ours with it.
+`Sec-Fetch-Site` — an `<img>` pointed at the bridge, or a page the bridge itself serves.
 
-With two or more sessions live, every origin goes to whichever ran `/connect` most recently, and
-that is asked when the comment arrives rather than when the page was first seen. Nothing a page
-did claims it for a session — not being opened by name, not being served by the bridge — because
-a record here is an id for pins and comment numbers and carries no session at all. One rule, with
-no second one to reason about: the last setup gesture is the one the user just made. When the
-session that owns the browser ends, it passes to the session that registered most recently. The
-corner button's tooltip and the compose panel both name the repo they are sending to, so this is
-visible rather than guessed, and `/comments` prints it.
+### One routing rule
 
-**The toolbar icon opens a menu of two switches**: this site on or off, and whether pins show
-outside comment mode. The icon used to toggle the origin on a bare click, which gave the one
-setting no label and left no room for a second one.
+**Every comment from every page goes to the session that ran `/connect` most recently**, and that
+is asked when the comment arrives rather than when the page was first seen. Nothing a page did
+claims it for a session — not being opened by name, not being served by the bridge — because a
+record here is an id for pins and comment numbers and carries no session at all. Opening a file
+is not a setup gesture either: `/open` deliberately does not touch the routing, or a file opened
+from one session would silently move the user's own pages to it. One rule, with no second one to
+reason about: the last setup gesture is the one the user just made. When the session that owns the
+browser ends, it passes to the session that registered most recently. The corner button's tooltip,
+the toolbar menu and the compose panel all name the repo they are sending to, so this is visible
+rather than guessed; `/comments` prints it, and `/connect` says out loud when it has just taken
+the browser from another live session, since that session is never told.
+
+**The toolbar icon opens a menu**: the session the browser reports to (or that none is connected,
+which is the only place that can say so without a comment being sent), the Slack connection, and
+two switches — this site on or off, and whether pins show outside comment mode. The icon used to
+toggle the origin on a bare click, which gave the one setting no label and left no room for
+anything beside it.
 
 **Turning a site off is immediate, and for good.** The overlay already in every open tab on that
 origin leaves comment mode, drops its panel and list, and hides. It used to take effect only on the
@@ -82,12 +101,27 @@ enough to try.
 - **There is no relay, and no way for a page to reach the worker.** Pages the bridge serves once
   loaded the overlay with a `<script>` tag of their own and asked the extension through a
   `postMessage` channel a content script carried; they are injected into like any other origin
-  now, so the channel — and everything on the page that could have used it — is gone.
+  now, so the channel — and everything on the page that could have used it — is gone. With it
+  went the fallbacks that channel existed for: a page-world configuration read off a script tag,
+  a page posting its own comment, and a capture path that asked the user to share the tab.
 - **The bridge takes a comment from the extension and from nowhere else.** A pin's storage key
   carries its preview id, and the page can read its own `localStorage` — so posting that id
-  straight to the bridge from the page is refused, whatever page it is. A request with no
-  `Origin` at all is refused too: that is not the extension either, and a comment arrives as
-  something the user said.
+  straight to the bridge from the page is refused, whatever page it is. `/comment` requires a
+  `chrome-extension://` `Origin`, which the browser sets and a page cannot forge; a request with
+  no `Origin` at all is refused too, since curl and every other process on this machine is not
+  the extension either, and a comment arrives as something the user said. **There is no CORS
+  anywhere on this server**, `/comment` included — see *When a comment does not arrive*.
+- **`x-cc-ext` is a sighting, never a grant.** Every request the worker makes carries the
+  extension's own id, and the daemon records that an extension exists — beside a
+  `chrome-extension://` Origin and nowhere else, because a page can send any header it likes by
+  accepting a preflight. No route consults it to decide whether a caller may do anything, and
+  none ever may.
+- **The `__ccTest` seam is safe only because there is one world.** The overlay hands its internals
+  to `window.__ccTest` for `test/overlay.test.mjs`; in the isolated world the `__ccTest` a page
+  defines is a different object the overlay never sees. That is what lets `askExtension` — the one
+  thing there that reaches outside the page — sit on the list. **If a page-world loader is ever
+  reintroduced, `askExtension` comes off the seam first**, and the comment above it in
+  `extension/overlay.js` says so where it would be read.
 - **The console capture is the one piece in the page world**, because that is where the page's
   console is. It hands lines to the overlay as DOM events, which a page can fake — all that
   reaches is the `console` field of a comment the user is sending. It guards every step and
@@ -105,12 +139,24 @@ injection is not. `fixtures/strict-csp.html` is the check.
 
 A page in the browser can reach `127.0.0.1:4517`, and a `POST` with a `text/plain` body is sent
 without any CORS preflight — the page cannot read the answer, but whatever the request does, it
-does. The routes that register sessions, open files and stream comments therefore require a
-**control token**: the daemon writes it to `$TMPDIR/claude-ui-comments/token-<port>` (mode 0600)
-once the port is its own, and `connect`, `ctl` and the monitor send it. A web page cannot read the
-file. Without the token `/health` says only that the bridge is up. Every `POST` must also be
-`application/json`, which a cross-origin page cannot send without a preflight this server never
-grants anywhere.
+does. So every route falls into one of three kinds:
+
+- **Control token**, for this machine's own callers: `/register`, `/connect`, `/open` and
+  `/events`. The daemon writes the token to `$TMPDIR/claude-ui-comments/token-<port>` (mode 0600)
+  once the port is its own, and `connect`, `open`, `ctl` and the monitor send it. A web page
+  cannot read the file.
+- **The extension's alone**: `/resolve`, `/status`, `/comment` and the Slack routes. What they
+  hand back is the user's — which session holds the browser, where in Slack they can post — and a
+  comment is something the user is said to have written. `/comment` is the strict case and takes
+  only a `chrome-extension://` Origin; the others also accept a request the browser marks as
+  coming from no web context at all.
+- **Public**: `/health`, which without the token says only that the bridge is up; `/p/<id>/…`,
+  which is the user's own file being served to the user's own browser; and `/slack/callback`,
+  which is where Slack sends the browser back and cannot carry any of the above — what guards it
+  is the single-use `state` the login that owns it minted.
+
+Every `POST` must also be `application/json`, which a cross-origin page cannot send without a
+preflight this server never grants anywhere.
 
 This was not hypothetical. Session keys become directory names, and an ended session's directory
 is removed recursively — so registering a session named `../../../..` with a pid that does not
@@ -147,10 +193,15 @@ second route is gone, and the bridge refuses a direct post from any page at all.
 The id a page's markers are stored under (`cc-pins-<previewId>` in `localStorage`) used to be
 minted fresh every time a target was opened, which meant opening the same app twice silently
 orphaned every pin. Ids are now created once per origin — and once per file for the pages the
-bridge serves — and reused by every session. A record carries no session, so the browser passing
-from one session to another leaves every pin where it was; what changes is only where the next
-comment goes. Nothing drops the records any more, so the state file keeps the two hundred most
-recently used and lets the rest go. Ids from the older, per-target format are given their origin
+bridge serves — and reused by every session. **A record is a name, not a routing decision**: it
+holds an origin or a file and nothing else, no session, no claim and no rank, so the browser
+passing from one session to another leaves every pin where it was and only where the next comment
+goes changes. Records therefore outlive every session that used them, and nothing drops them any
+more — which makes the state file the thing that has to be bounded, so it keeps the two hundred
+most recently resolved and lets the rest go. A file's record is also dropped if the file itself
+has gone. The overlay keeps the last hundred pins per id, which for a dev server means a hundred
+across all of that origin's routes and for a served file a hundred on that file.
+Ids from the older, per-target format are given their origin
 when the state is loaded, and the session fields they carried are dropped there, so nothing
 already on a page is lost.
 
@@ -511,8 +562,8 @@ picked** — a box for an element or a dragged region, a tint for quoted text. W
 a comment back leaves "which one was this?" unanswered. Unlike confirming an anchor, that box is
 not already on screen, so it gets the entrance rather than being switched on. A selection is
 stored as its individual line boxes rather than one bounding rect, so the tint comes back exactly
-as it was rather than as a block covering the whole paragraph. Pins are remembered per preview in
-`localStorage`. A pin clicked while a comment is half written is ignored rather than throwing the
+as it was rather than as a block covering the whole paragraph. Pins are remembered per preview id
+in `localStorage`. A pin clicked while a comment is half written is ignored rather than throwing the
 draft away.
 
 **The controls are icons in the corner; the content is the panel.** Close and Delete used to be
@@ -619,8 +670,8 @@ every Send — worse once the scrim and the list existed, since the page brighte
 card vanished and returned along with everything else.
 
 **So the screenshot is no longer taken at Send; it is taken when the anchor is picked.** No
-screenshot API can leave an element out of the picture — `captureVisibleTab`, `getDisplayMedia`
-and CDP all return the composited tab — so the tool has to step aside for the shutter somewhere,
+screenshot API can leave an element out of the picture — a tab capture and CDP alike return the
+composited tab — so the tool has to step aside for the shutter somewhere,
 and feedback tools that use a native capture do it at the start of the flow, where the hide is
 covered by the feedback UI arriving (Sentry's widget hides itself, captures, then reopens with the
 image). DOM rasterizers such as snapDOM or html-to-image avoid the hide altogether, but they cannot
@@ -655,18 +706,18 @@ frames*.
 `chrome.tabs.captureVisibleTab` accepts only `<all_urls>` or `activeTab` as a host permission, and
 a specific host permission such as `http://127.0.0.1/*` is rejected; `activeTab` is granted solely
 by clicking the toolbar icon, which does not fit a button that lives in the page. That permission
-was once the bug: with only specific host permissions, `captureVisibleTab` failed on every call,
-the overlay silently fell through to `getDisplayMedia`, and the result looked like a working
-feature that merely asked to share the tab each time. When a screenshot is missing the payload now
-carries a `capture` field with the capture error in it, and the notification prints it, so a
-broken capture path explains itself.
+was once the bug: with only specific host permissions, `captureVisibleTab` failed on every call
+and the overlay fell through to a second capture path, which asked the user to share the tab —
+the result looked like a working feature that merely asked permission each time. When a screenshot
+is missing the payload now carries a `capture` field with the capture error in it, and the
+notification prints it, so a broken capture path explains itself.
 
-**`getDisplayMedia` is not a fallback; it is not there at all.** An earlier version fell through
-to it whenever the extension's capture failed, which meant a broken capture path showed up as a
-share-this-tab dialog on every single comment plus a permanent sharing banner — while looking like
-it was working. A failed capture now yields no screenshot, and the panel's own screenshot line
-turns red with the actual Chrome error attached — a standing fact about this page's capture path
-rather than a notice that flies past while you are typing.
+**There is no second capture path, and deliberately none to add.** The screen-sharing API was
+that path, and a broken capture showed up as a share-this-tab dialog on every single comment plus
+a permanent sharing banner — while looking like it was working. A failed capture now yields no
+screenshot, and the panel's own screenshot line turns red with the actual Chrome error attached —
+a standing fact about this page's capture path rather than a notice that flies past while you are
+typing.
 
 **Only the page that asked is ever photographed.** `captureVisibleTab` captures whichever tab is
 showing in the window, not the one that sent the message. Switch tabs in the moment between a pick
@@ -683,16 +734,27 @@ refresh any page you had open.**
 
 ## Why targets are served through the bridge
 
-| target | how the overlay gets in | extension needed? |
-|---|---|---|
-| `report.html` | bridge injects `<script src="/overlay.js">` | no |
-| `diagram.png`, `.md`, `.txt` | bridge serves a wrapper page holding the overlay | no |
-| `http://localhost:5173/…` | the extension injects it into its isolated world | yes (or bookmarklet) |
+A file Claude produced has to become a *page* before anything here can work: an origin the
+extension can resolve, a URL the bridge can name in a notification, and a document the overlay can
+anchor into. `file://` is none of those: the worker's `originOf` answers only for `http(s)`, and
+a file URL has no origin the bridge could be asked about — quite apart from Chrome granting an
+extension access to file URLs only if the user goes and ticks it. So `/open` copies nothing and
+serves the file in place, under `http://127.0.0.1:4517/p/<id>/`, with its own directory as the
+root for relative assets.
 
-Anything that is not a page, markdown or an image is shown as plain text. **PDF is deliberately
-not among them**: nothing can place an anchor inside Chrome's PDF viewer, so a comment on one is a
-rectangle with nothing to find again, and `/open` refuses a `.pdf` outright rather than wrap it
-into a dead end.
+**HTML is served byte for byte.** The bridge used to rewrite it to add its own `<script>` tags;
+now the extension injects into that origin like any other, so what the person reviews is exactly
+the file they were shown. Markdown, plain text and images cannot carry an overlay or a stylesheet
+of their own, so those three get a small wrapper page that renders or links the file — and
+anything else is shown as plain text.
+
+**PDF is deliberately not among the kinds**: nothing can place an anchor inside Chrome's PDF
+viewer, so a comment on one is a rectangle with nothing to find again — `/open` answers `415` and
+`scripts/open.mjs` refuses before it even contacts the daemon, rather than wrap it into a dead end.
+
+Opening is Claude's gesture, not the user's: there is no command that takes a file. A web address
+is refused too (`400`), since every page the user opens already carries the button and there is
+nothing for the bridge to do with it.
 
 ## Delivery
 
@@ -717,15 +779,17 @@ into a dead end.
   monitor adopts it, so it is owed everything the new daemon numbers from that moment on — see
   **When a comment does not arrive** for why a watermark of 0 had to stop meaning "send me
   nothing". This bug was real and cost a comment before it was found.
-- **Preview links survive a daemon restart.** The preview table, the comment counters and the
-  event sequence counter are persisted to `$TMPDIR/claude-ui-comments/previews-<port>.json` —
-  written through a temp file and a rename, so a crash mid-write cannot lose it — and reloaded on
-  start, so a tab you left open keeps working when the daemon is restarted or idle-exits. Entries
-  whose owning session process has died, or whose file has been deleted, are dropped on load. An
-  unknown preview id returns a readable HTML page explaining the link expired, not raw JSON —
-  someone is looking at it in a browser. The seq counter is persisted for a specific reason: reset
-  it and a reconnecting monitor would treat replayed events as already-seen and silently drop them.
-- **A daemon from older code is replaced.** It would serve its own routes and its own overlay,
+- **Links survive a daemon restart.** The records, the comment counters and the event sequence
+  counter are persisted to `$TMPDIR/claude-ui-comments/previews-<port>.json` — written through a
+  temp file and a rename, so a crash mid-write cannot lose it — and reloaded on start, so a tab
+  left open keeps working when the daemon is restarted or idle-exits. Records are not dropped
+  with the session that used them; what a reload does drop is a file that no longer exists, and
+  anything past the two hundred most recently resolved. An id the daemon does not know returns a
+  readable HTML page saying so, not raw JSON — someone is looking at it in a browser. The seq
+  counter is persisted for a specific reason: reset it and a reconnecting monitor would treat
+  replayed events as already-seen and silently drop them.
+- **A daemon from older code is replaced.** It would serve its own routes and answer them its own
+  way,
   and fail in ways that look like the new code being broken. `/health` reports where the daemon
   was started from and a fingerprint of its code; `/connect` compares both with its own and
   restarts the daemon when they differ.
@@ -836,17 +900,20 @@ button still there to send it somewhere else.
 
 ## When a comment does not arrive
 
-Two failures look identical from the page — the Send button spins and the panel says the bridge
-is not answering — and they have different causes.
+Several failures look alike from where the user is standing — the Send button spins and the panel
+says the bridge is not answering, or no button ever appears at all — and they have quite different
+causes. Each one below is something that had to be made to say which it is.
 
 **No CORS anywhere, including `/comment`.** `/comment` once granted a preflight, for the one
-caller that needed one: a bookmarklet on `localhost:5173` posting cross-origin to the bridge on
+caller that ever needed one: a page on `localhost:5173` posting cross-origin to the bridge on
 `127.0.0.1:4517`, which the browser will not hand a response to without an
 `access-control-allow-origin` header. That caller is gone. A comment now comes from the
 extension's service worker, whose fetch is covered by the manifest's `host_permissions` and is
 not subject to CORS at all, and `/comment` refuses every page whatever its origin — so the grant
-bought nothing and the `OPTIONS` handler went with it. A page attempting the POST now stops at
-its own preflight, which `404`s like any other method this server does not handle.
+bought nothing and the `OPTIONS` handler went with it. That was hand-checked in Chrome before it
+was taken out, not reasoned about: a comment from an extension-injected `https` page still
+arrives. A page attempting the POST now stops at its own preflight, which `404`s like any other
+method this server does not handle.
 
 **No extension.** The other silent failure, and the one the daemon can see: every page carries
 its button because the extension puts it there, so with no extension installed a session can
@@ -925,7 +992,8 @@ change.
 
 The daemon itself survives sleep — it idle-exits only when no registered session's process is
 still alive, and sleeping does not end a process. What does kill it is the Claude session ending:
-five minutes later the daemon exits, and an old preview tab then has nothing to talk to. The page
+five minutes later the daemon exits, and a tab left open on a served file has nothing to talk to
+then. The page
 says so and names the fix (`/connect` again) rather than reporting a transport error, and the
 comment stays in the box to be sent once it is back. The extension's page-load lookups do not
 count as activity, so browsing does not keep an unused daemon alive.
@@ -937,6 +1005,12 @@ screen to send again.
 
 ## Slash commands
 
+There are three, and they are all the user has to know: `/connect`, `/comments` and
+`/slack [login|logout|status]`. Nothing opens a file, because opening one is Claude's gesture —
+`scripts/open.mjs`, taught by the **show-file** skill — and a command for it would be one more
+thing to remember for something the agent is better placed to do at the moment it has produced
+the file.
+
 The slash commands deliberately do **not** use the `` !`…` `` auto-execution form. That runs at
 command-expansion time and needs a shell permission it cannot always obtain — on some connections
 it fails with `Shell command permission check failed` and the command does nothing. The commands
@@ -947,4 +1021,6 @@ keys off the skill invocation, not off the command succeeding.
 > **The arm trigger must use the plugin-namespaced skill name** (`local-artifact:connect`, not
 > `connect`). The host compares it with exact string equality against the name it emits, which is
 > `<plugin>:<skill>` for plugin skills — a bare name silently matches nothing and no monitor is
-> ever started. Rename the plugin and this string has to change with it.
+> ever started. Rename the plugin and this string has to change with it. Nothing in the running
+> system can notice that, so `test/plugin.test.mjs` notices it from the files on disk: it reads
+> the trigger, and demands a command and a script of exactly that name.

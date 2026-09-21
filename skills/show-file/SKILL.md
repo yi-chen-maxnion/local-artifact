@@ -25,6 +25,11 @@ The first line of the error says which rung failed:
 - `the monitor is not attached` - the same: `/connect` in this session, then offer to open it again.
 - `<repo> is the session connected to the browser` - another session would receive the comments.
   Ask the user which session should get them; do not take the browser from the other one.
+- `the extension has never reached the bridge` - the Chrome extension is what puts the comment
+  button on a page, and nothing has ever reached the bridge, so the file would open into a browser
+  with no button on it. Tell the user to install it at the path the line prints
+  (`chrome://extensions` -> Developer mode -> Load unpacked), then open any page in Chrome once so
+  the bridge sees it, and then try again.
 - `PDF is not supported` - Chrome's PDF viewer admits no anchor, so a comment on one could never
   be found again. Offer the same content as HTML or markdown instead.
 - `not a file` - check the path you wrote it to.
