@@ -247,7 +247,19 @@ function loadState() {
     kept.push([id, { origin, target: pv.target || origin, at }]);
   }
   kept.sort((a, b) => b[1].at - a[1].at);
-  for (const [id, pv] of kept.slice(0, MAX_PREVIEWS)) previews.set(id, pv);
+  // One record per origin and one per file - which a state file written before records lost their
+  // session does not hold: back then an origin got a record per session that saw it, so an upgrade
+  // would carry the same origin several times over, list it twice in /comments, and leave the pins
+  // under every id but the first orphaned, since `previewFor` only ever returns that first match.
+  // Most recently used wins, because its pins are the ones likeliest to still be on screen.
+  const seen = new Set();
+  const unique = kept.filter(([, pv]) => {
+    const name = pv.entry ? `f:${pv.entry}` : `o:${pv.origin}`;
+    if (seen.has(name)) return false;
+    seen.add(name);
+    return true;
+  });
+  for (const [id, pv] of unique.slice(0, MAX_PREVIEWS)) previews.set(id, pv);
   store.restoreCounters(raw.counters, (id) => previews.has(id));
 }
 

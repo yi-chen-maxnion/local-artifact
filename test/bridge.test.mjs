@@ -461,6 +461,42 @@ test('previews, counters and seq survive a daemon restart', async () => {
 });
 
 /**
+ * A state file written before records lost their session holds one record per session that saw an
+ * origin, so the same origin arrives several times over. A restart that kept them all would list
+ * the origin twice in /comments and orphan the pins under every id but the one `previewFor`
+ * returns; the upgrade collapses them onto the most recently used id, whose pins are the ones
+ * likeliest to still be on the page.
+ */
+test('a restart collapses duplicate records from an older state file', async () => {
+  const first = await startBridge();
+  const state = path.join(first.stateDir, `previews-${first.port}.json`);
+  const entry = path.join(first.dir, 'report.html');
+  fs.writeFileSync(entry, '<p>hi</p>');
+  await first.stop();
+
+  const site = 'http://localhost:7100';
+  // Written between the stop and the restart, in the shape the older daemon left behind: two ids
+  // for the one origin, two for the one file, least recently used first so order cannot flatter it.
+  fs.writeFileSync(state, JSON.stringify({
+    seq: 0,
+    previews: [
+      ['oldorign', { origin: site, target: site, at: 1000, sessionKey: 'p1' }],
+      ['newrigin', { origin: site, target: site, at: 2000, sessionKey: 'p2' }],
+      ['oldfilee', { target: entry, entry, kind: 'html', root: first.dir, at: 1500, sessionKey: 'p1' }],
+      ['newfilee', { target: entry, entry, kind: 'html', root: first.dir, at: 2500, sessionKey: 'p2' }],
+    ],
+  }));
+
+  const second = await startBridge({ tmp: first.dir, port: first.port });
+  try {
+    const { previews } = await (await second.request('/health')).json();
+    assert.deepEqual(previews.map((pv) => pv.id).sort(), ['newfilee', 'newrigin']);
+  } finally {
+    await second.stop();
+  }
+});
+
+/**
  * The id an origin is known by belongs to the origin, not to a session: it is the namespace the
  * page's pins and comment numbers live in, and the browser passing from one session to another
  * must not orphan a single one of them. What moves is where the comments go, which is asked of
