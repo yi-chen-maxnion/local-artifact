@@ -35,6 +35,8 @@ claude plugin install local-artifact@local-artifact
 2. 右上角打開 **開發人員模式**
 3. 按 **載入未封裝項目**，選 `~/local-artifact/extension` 這個資料夾
 
+![chrome://extensions：右上角開發人員模式，左上角載入未封裝項目](docs/install-extension.png)
+
 Chrome 會說這個擴充功能「可以讀取所有網站」——它需要這個權限才能在任何網頁上放留言按鈕和截圖。
 
 ## 4. 開始用
