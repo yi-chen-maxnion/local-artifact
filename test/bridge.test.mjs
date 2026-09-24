@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fmt } from '../lib/format.mjs';
+import { extensionStatus, fmt } from '../lib/format.mjs';
 import { fileHash } from '../lib/reanchor.mjs';
 import {
   EXTENSION_ID, ROOT, comment, connect, freePort, listen, open, originId, register, resolveOrigin,
@@ -595,8 +595,9 @@ describe('bridge', () => {
  * Nothing else here can answer it. A session registers, connects, opens a file, and every one of
  * those succeeds in a browser with no extension in it - where no page carries a button and no
  * comment is ever sent. The signal is a header the service worker puts on every request it makes;
- * what makes it worth anything is the Origin beside it, since a page can send a header of its own
- * choosing through a preflight and must never be able to claim this.
+ * what makes it worth anything is that a web page cannot send it: a page's Origin is its own, and
+ * one the bridge serves is marked same-origin. The worker's GETs carry no Origin at all - see the
+ * next describe.
  */
 describe('the extension-seen signal', () => {
   let bridge;
@@ -653,6 +654,73 @@ describe('the extension-seen signal', () => {
     await bridge.stop();
     bridge = await startBridge({ tmp: bridge.dir, port: bridge.port });
     assert.deepEqual(await seen(), was);
+  });
+});
+
+/**
+ * The signal as Chrome actually sends it. Measured in Chrome 154: the service worker's GETs -
+ * /resolve on every page load, the /health hello - carry `x-cc-ext`, `x-cc-ext-version` and
+ * `Sec-Fetch-Site: none`, and no Origin at all; only its POSTs carry `Origin: chrome-extension://`.
+ * A sighting that needed the Origin was one only a sent comment could make.
+ */
+describe('the extension-seen signal, from requests without an Origin', () => {
+  let bridge;
+  const ID = EXTENSION_ID;
+  const OTHER = 'ponmlkjihgfedcbaponmlkjihgfedcba';
+  const site = 'http://localhost:7710';
+  const health = async () => (await bridge.request('/health')).json();
+  const get = (headers) => bridge.request(`/resolve?origin=${encodeURIComponent(site)}`, { token: null, headers });
+  const worker = (id = ID, version = '0.2.0') => ({
+    'x-cc-ext': id, 'x-cc-ext-version': version, 'sec-fetch-site': 'none', 'sec-fetch-mode': 'cors',
+  });
+
+  before(async () => { bridge = await startBridge(); });
+  after(() => bridge.stop());
+
+  test('a web page with the extension\'s headers is not the extension', async () => {
+    // Its own Origin, cross-site or same-site; and a page the bridge serves, which is same-origin
+    // and so sends no Origin on a GET - but is marked as a web context.
+    await get({ ...worker(), origin: site, 'sec-fetch-site': 'cross-site' });
+    await get({ ...worker(), origin: `http://127.0.0.1:${bridge.port}`, 'sec-fetch-site': 'same-origin' });
+    await get({ ...worker(), 'sec-fetch-site': 'same-origin' });
+    await get({ ...worker(), 'sec-fetch-site': 'cross-site' });
+    const h = await health();
+    assert.equal(h.extension, null);
+    assert.deepEqual(h.extensions, []);
+  });
+
+  test('a GET /resolve from the worker, with no Origin, is a sighting with its id and version', async () => {
+    const before = Date.now();
+    await get(worker());
+    const h = await health();
+    assert.equal(h.extension.id, ID);
+    assert.equal(h.extension.version, '0.2.0');
+    assert.ok(h.extension.seenAt >= before);
+    assert.deepEqual(h.extensions.map((e) => [e.id, e.version]), [[ID, '0.2.0']]);
+    // And the /health hello, which also carries no Origin and whose answer is the public view.
+    await bridge.request('/health', { token: null, headers: worker(ID, '0.2.1') });
+    assert.equal((await health()).extensionVersion, '0.2.1');
+  });
+
+  // An id-less sighting is the extension already known: counting it as another would warn of a
+  // second copy loaded that does not exist.
+  test('a sighting without an id is the last one seen, not a second copy', async () => {
+    const { 'x-cc-ext': _, ...noId } = worker(ID, '0.2.2');
+    await get(noId);
+    const h = await health();
+    assert.equal(h.extension.id, ID);
+    assert.equal(h.extensionVersion, '0.2.2');
+    assert.deepEqual(h.extensions.map((e) => [e.id, e.version]), [[ID, '0.2.2']]);
+    assert.doesNotMatch(extensionStatus(h, '/x'), /WARNING/);
+  });
+
+  // The Origin is the browser's word and outranks the header when both are there.
+  test('with an Origin, the id is the Origin\'s', async () => {
+    await get({ ...worker(ID, '0.2.2'), origin: `chrome-extension://${OTHER}` });
+    const h = await health();
+    assert.equal(h.extension.id, OTHER);
+    assert.deepEqual(h.extensions.map((e) => e.id).sort(), [ID, OTHER].sort());
+    assert.match(extensionStatus(h, '/x'), /WARNING {4}an older copy of the extension is also loaded/);
   });
 });
 

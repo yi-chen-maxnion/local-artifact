@@ -212,24 +212,44 @@ const EXTENSION_SAVE_MS = 60 * 1000;
  * This is the one signal that tells a command the difference, and every place that reports status
  * prints it.
  *
- * The header alone grants nothing, and must never be made to: a page CAN send a custom header,
- * by accepting a CORS preflight, so anything at all can claim to be an extension here. What is
- * not forgeable is the Origin, which the browser sets - so this only records a sighting, only
- * when the request also comes from a chrome-extension:// origin, and no route consults it to
- * decide whether a caller is allowed anything.
+ * What the extension's service worker actually sends, measured in Chrome 154: `x-cc-ext` (its id)
+ * and `x-cc-ext-version` on every request, `Sec-Fetch-Site: none` - and an Origin only on a POST.
+ * Its GETs - /resolve on every page load, the /health hello at start-up - carry no Origin at all.
+ * Requiring a chrome-extension Origin, as this once did, therefore saw the extension only when a
+ * comment was sent: a browser full of pages read as "last seen 4h ago", and the version, the
+ * two-copies and the old-copy warnings were fed by the rare POST alone.
+ *
+ * So the test is `extensionOnly`, the same one the extension-only routes use: a chrome-extension
+ * Origin, or no Origin and nothing marking a web context. What that keeps out is every web page. A
+ * page on another origin cannot put a custom header on a request here without a CORS preflight,
+ * which this server never grants, so the request carrying it is never sent; a page this bridge
+ * serves is same-origin and may, but the browser marks its requests `Sec-Fetch-Site: same-origin`;
+ * and a page's Origin is its own, never chrome-extension://. What it does not keep out is another
+ * process on this machine, which can send any header it likes - and gains nothing by it, because
+ * a sighting is a timestamp and a version for a status line. No route consults it to decide
+ * whether a caller is allowed anything, and none ever may.
+ *
+ * The id is the Origin's when there is one, since the browser sets that; otherwise the header's.
+ * A request that says a version and no id is counted for the id last seen rather than as a new
+ * one - it is the same extension, and an id made up for it would read as a second copy loaded.
  */
 function noteExtension(req) {
-  const id = req.headers['x-cc-ext'];
-  if (typeof id !== 'string' || !EXTENSION_ID.test(id) || !isExtension(req.headers.origin)) return;
+  const said = req.headers['x-cc-ext'];
+  const saidVersion = req.headers['x-cc-ext-version'];
+  // Not the extension's request at all, or one wearing its header with something that is not an
+  // extension id in it: nothing to record.
+  if (said === undefined ? saidVersion === undefined : typeof said !== 'string' || !EXTENSION_ID.test(said)) return;
+  if (!extensionOnly(req)) return;
+  const fromOrigin = /^chrome-extension:\/\/([a-p]{32})$/.exec(req.headers.origin || '')?.[1];
+  const id = fromOrigin || said || extensionId;
   extensionSeenAt = Date.now();
   // What it says it runs. An extension from before self-update sends nothing, and that absence
   // is itself the news: it is a copy that will never update, and /connect says to remove it.
-  const said = req.headers['x-cc-ext-version'];
-  const version = typeof said === 'string' && SEMVER.test(said) ? said : '';
-  const fresh = id !== extensionId || version !== extensionVersion || !extensions.has(id);
+  const version = typeof saidVersion === 'string' && SEMVER.test(saidVersion) ? saidVersion : '';
+  const fresh = id !== extensionId || version !== extensionVersion || (id && !extensions.has(id));
   extensionId = id;
   extensionVersion = version;
-  extensions.set(id, { version, seenAt: extensionSeenAt });
+  if (id) extensions.set(id, { version, seenAt: extensionSeenAt });
   // Lazily persisted. /resolve runs on every page load, and a state write per page load would be
   // the most frequent disk write this daemon makes - for a value nothing reads more than once a
   // command. Written when the id changes (a reinstall mints a new one), and otherwise at most
