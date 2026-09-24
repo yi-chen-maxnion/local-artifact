@@ -180,6 +180,63 @@ describe('reorders, moves and deletions', () => {
   test('the first of two twins deleted: the copy left may be either one, so it is lost', () => {
     stayLost(cards([alpha, twin, twin, omega], 2), cards([alpha, twin, omega]));
   });
+
+  /**
+   * One edit inserts a card where the commented one stood and rewrites the commented one: new
+   * class, new words. The newcomer has the old class and the old slot, which is all the shape
+   * match sees. Two candidates, and the words do not clearly pick either - "Two, reworded" shares
+   * "two" and "the" with the old text, the newcomer shares "card" - so today it is lost. The
+   * reworded card would also be right. The newcomer never is.
+   */
+  const tagged = (list, keep) => `<h1>Update</h1>${list.map(([cls, t], i) => `<p class="${cls}"${i === keep ? ' data-fixture="keep"' : ''}>${t}</p>`).join('')}`;
+  const before = tagged([['card', 'One: the first card.'], ['card', 'Two: the commented card.'], ['card', 'Three: the third card.']], 1);
+
+  test('a card inserted in its place while it was reworded and re-classed: never the newcomer', () => {
+    const after = tagged([
+      ['card', 'One: the first card.'], ['card', 'NEW: inserted card.'],
+      ['tile', 'Two, reworded after the update.'], ['card', 'Three: the third card.'],
+    ], 2);
+    const source = captureSource(strip(before), anchorFor(before, 'keep'));
+    const out = relocate(strip(before), strip(after), source);
+    if (out.lost) return;
+    assert.notDeepEqual(out.chain, [{ tag: 'p', index: 1 }], 'the pin went to the inserted card');
+    assert.deepEqual(out.chain, chainOf(after, { fixture: 'keep' }));
+  });
+
+  /**
+   * The same insertion, with the commented card only re-classed. Its words are all still there,
+   * word for word, and the newcomer shares one of them: that is a clear winner on what the element
+   * says, so it follows - to the re-classed card, not the one in its old slot and class.
+   */
+  test('a card inserted in its place while it was only re-classed: follows the words', () => {
+    follow(before, tagged([
+      ['card', 'One: the first card.'], ['card', 'NEW: inserted card.'],
+      ['tile', 'Two: the commented card.'], ['card', 'Three: the third card.'],
+    ], 2));
+  });
+
+  /**
+   * The counterpart: nothing inserted, two neighbouring rows both edited. Their words are nearly
+   * the same, so on words alone neither is a clear winner - but the stretch did not grow, the
+   * rows were rewritten where they stood, and order says which is which.
+   */
+  test('two neighbouring rows edited in one change each stay on their own row', () => {
+    const row = (name, status) => ['row', `Row ${name}: status ${status}, owner Ann, due Friday, priority high, team Core`];
+    follow(
+      tagged([row('one', 'open'), row('two', 'open'), row('three', 'open'), row('four', 'open')], 1),
+      tagged([row('one', 'open'), row('two', 'closed'), row('three', 'closed'), row('four', 'open')], 1),
+    );
+  });
+
+  test('a card inserted in its place while it was reworded, keeping most of its words: follows', () => {
+    follow(
+      tagged([['card', 'Intro'], ['card', 'Pricing: ten dollars a month for the team plan'], ['card', 'Outro']], 1),
+      tagged([
+        ['card', 'Intro'], ['card', 'Features: fast and simple'],
+        ['tile', 'Pricing: twelve dollars a month for the team plan, billed yearly'], ['card', 'Outro'],
+      ], 2),
+    );
+  });
 });
 
 describe('selections and regions', () => {
