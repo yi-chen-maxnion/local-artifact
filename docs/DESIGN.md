@@ -141,8 +141,8 @@ A page in the browser can reach `127.0.0.1:4517`, and a `POST` with a `text/plai
 without any CORS preflight — the page cannot read the answer, but whatever the request does, it
 does. So every route falls into one of three kinds:
 
-- **Control token**, for this machine's own callers: `/register`, `/connect`, `/open` and
-  `/events`. The daemon writes the token to `$TMPDIR/claude-ui-comments/token-<port>` (mode 0600)
+- **Control token**, for this machine's own callers: `/register`, `/connect`, `/disconnect`,
+  `/shutdown`, `/open` and `/events`. The daemon writes the token to `$TMPDIR/claude-ui-comments/token-<port>` (mode 0600)
   once the port is its own, and `connect`, `open`, `ctl` and the monitor send it. A web page
   cannot read the file.
 - **The extension's alone**: `/resolve`, `/status`, `/comment` and the Slack routes. What they
@@ -1021,10 +1021,53 @@ arrive minutes after the fact, quite possibly into a different session than the 
 written for — worse than a comment that simply says it did not send while the text is still on
 screen to send again.
 
+## Turning it off
+
+`/disconnect` takes this session off the browser; `/disconnect --stop` also stops the bridge.
+Both were missing for a long time, and the reason neither is simply "end the monitor" is the
+constraint everything below is shaped by.
+
+**The monitor never exits.** The host starts a plugin monitor the first time `/connect` runs in a
+session and documents nothing about starting it again. A monitor that left on disconnect would
+leave the next `/connect` in that session registered, primary, and attached to nothing — every
+comment accepted and none delivered. So it stays, streaming, through a disconnect and through a
+stopped bridge alike, and a disconnected session is simply one the daemon never routes to.
+
+**So "disconnected" is the daemon's state, and it is persisted.** `/disconnect` marks the session
+`detached`; if it held the browser, the browser passes on exactly as it would had the session
+ended — to the most recently registered session that is not detached, or to nobody. The trap is
+`/register`. The monitor sends it on every reconnect, and it hands the browser to whoever
+registers when nobody holds it, so a detached session is excluded there as well as from the
+handover — or the first dropped stream would quietly undo the disconnect. Sessions themselves are
+not persisted (monitors re-register after a restart), which means the mark would be lost with
+them and a restarted daemon would let the first reconnecting monitor take the browser back. The
+detached keys are written to the state file with their pids, and an entry goes when its pid is no
+longer alive, at load and on every prune: a key is a pid, and a pid comes round again. Only
+`/connect` clears the mark. `/health` reports it per session, and `/comments` prints
+`not this session - disconnected; /connect to take it back` on the `browser` line.
+
+**Stopping the bridge is one routine** for `/shutdown`, SIGTERM, SIGINT, SIGHUP and the idle exit,
+in this order: refuse new requests with a `503`, so nothing lands after the state is written; save
+the state; write `event: bye` with the reason to every monitor's stream and end it; close the
+listener and, once those goodbyes have flushed, every connection; remove the token file only if it
+is still this process's, since a daemon started the moment the port came free has written its own
+there; exit 0. A hard exit after three seconds covers a socket that never finishes flushing, and
+the routine runs once however many times it is asked. `/shutdown` answers before any of that — the
+caller has to get its `200` — with the sessions that were registered, so the command can say which
+other sessions just lost their comments; they are never told otherwise.
+
+The `bye` is what tells a stopped bridge from a restarting one. An ended stream on its own looks
+like a daemon about to come straight back, which the monitor answers with twelve quick retries; a
+bridge stopped on purpose comes back only when somebody runs `/connect`, so on `bye` with reason
+`shutdown` the monitor goes straight to its slow retry, silently, and a 503 from a daemon on its
+way out is not reported as a refusal either. A signal says `signal` instead, because a signal is
+also how `/connect` replaces a daemon running older code, and there the monitors should be back on
+the new one at once.
+
 ## Slash commands
 
-There are three, and they are all the user has to know: `/connect`, `/comments` and
-`/slack [login|logout|status]`. Nothing opens a file, because opening one is Claude's gesture —
+There are four, and they are all the user has to know: `/connect`, `/disconnect [--stop]`,
+`/comments` and `/slack [login|logout|status]`. Nothing opens a file, because opening one is Claude's gesture —
 `scripts/open.mjs`, taught by the **show-file** skill — and a command for it would be one more
 thing to remember for something the agent is better placed to do at the moment it has produced
 the file.

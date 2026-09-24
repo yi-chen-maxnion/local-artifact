@@ -75,7 +75,8 @@ export async function startBridge({ tmp, port: fixedPort, env = {} } = {}) {
     });
 
   const stop = () => new Promise((resolve) => {
-    if (child.exitCode !== null) return resolve();
+    // Either one: a daemon that died of a signal has no exit code, and its exit has already fired.
+    if (child.exitCode !== null || child.signalCode !== null) return resolve();
     child.once('exit', resolve);
     child.kill();
   });
@@ -200,20 +201,32 @@ export async function listen(bridge, key, { from, since } = {}) {
   // Consumed here so a replay sharing this chunk is all `next` ever sees.
   buf = buf.slice(end + 2);
 
+  /** The data of the next frame of this event, parsed; frames of any other event are passed over. */
+  const upTo = async (name) => {
+    for (;;) {
+      let i;
+      while ((i = buf.indexOf('\n\n')) !== -1) {
+        const { event, data } = parseFrame(buf.slice(0, i));
+        buf = buf.slice(i + 2);
+        if (event === name && data !== undefined) return JSON.parse(data);
+      }
+      const { value, done } = await reader.read();
+      if (done) throw new Error('the stream ended');
+      buf += dec.decode(value, { stream: true });
+    }
+  };
+
   return {
     hello: JSON.parse(greeting.data),
     /** The next delivered comment event, as the session's monitor would receive it. */
-    next: async () => {
+    next: () => upTo('comment'),
+    /** The daemon's goodbye, which it sends to every stream when it stops. */
+    bye: () => upTo('bye'),
+    /** True once the daemon has ended the stream, having read whatever was left on it. */
+    ended: async () => {
       for (;;) {
-        let i;
-        while ((i = buf.indexOf('\n\n')) !== -1) {
-          const { event, data } = parseFrame(buf.slice(0, i));
-          buf = buf.slice(i + 2);
-          if (event === 'comment' && data !== undefined) return JSON.parse(data);
-        }
-        const { value, done } = await reader.read();
-        if (done) throw new Error('the stream ended');
-        buf += dec.decode(value, { stream: true });
+        const { done } = await reader.read();
+        if (done) return true;
       }
     },
     close: () => reader.cancel(),

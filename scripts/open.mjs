@@ -65,6 +65,9 @@ if (!me) refuse(NOT_CONNECTED, 3);
 // Registered, but with nothing on its stream: the page would carry the button and the comment
 // would be accepted, and no notification would ever reach this session.
 if (!me.clients) refuse('the monitor is not attached - run /connect in this session, then try again', 3);
+// It ran /disconnect: its comments go nowhere by its own choice, and the rung below would name
+// whoever holds the browser as though this session had merely lost it.
+if (me.detached) refuse('this session is disconnected - run /connect here to take the browser back, then try again', 3);
 
 if (h.primary !== session.key) {
   const other = h.sessions.find((s) => s.key === h.primary);

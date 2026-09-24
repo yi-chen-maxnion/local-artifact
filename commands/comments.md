@@ -11,7 +11,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.mjs" status
 
 Relay it plainly. If the bridge is not running, say that `/connect` starts it.
 The `browser` line says which session every comment goes to, whatever page it was left on; if it
-names another session, running `/connect` here takes it over.
+names another session, running `/connect` here takes it over. `not this session - disconnected`
+means this session ran `/disconnect` and will not be handed the browser by anything but its own
+`/connect`. `/disconnect --stop` is how the bridge itself is stopped.
 The `extension` line says whether anything can put the comment button on a page at all. Relay it
 whenever it is not `seen`: `NOT SEEN` means the Chrome extension has never reached the bridge, so
 no page carries the button and nothing can be sent - tell the user to install it from the path the

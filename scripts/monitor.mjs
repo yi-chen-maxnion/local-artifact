@@ -9,7 +9,8 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import {
-  ORIGIN, PING_MS, bridge, readToken, resolveSession, scratchDir, sleep, watermarkFile, writeFileAtomic,
+  ORIGIN, PING_MS, bridge, readToken, resolveSession, retryDelay, scratchDir, sleep, watermarkFile,
+  writeFileAtomic,
 } from '../lib/common.mjs';
 import { fmt } from '../lib/format.mjs';
 import { parseFrame } from '../lib/sse.mjs';
@@ -20,11 +21,6 @@ if (!session.key) {
   process.exit(1);
 }
 
-// Reconnect eagerly at first: a daemon restart leaves a window in which comments are only
-// recoverable from the replay buffer, and a shorter window means fewer that depend on it.
-const RETRY_FAST_MS = 400;
-const RETRY_SLOW_MS = 5000;
-const FAST_ATTEMPTS = 12;
 /**
  * A dead SSE stream does not announce itself. Sleep the machine, drop the Wi-Fi or flip a
  * VPN and the socket is left half-open: no error, no close, and `reader.read()` waits for a
@@ -117,6 +113,10 @@ function emit(p) {
   remember();
 }
 
+/**
+ * One stream, until it ends. Resolves to the daemon's `bye` when it said one - why it is going
+ * away, which is what decides how soon to come back - and to null when the stream simply ended.
+ */
 async function connect() {
   const ac = new AbortController();
   // Neither parameter until there is a watermark - the daemon's own `seq` is about to supply one,
@@ -145,7 +145,7 @@ async function connect() {
   try {
     for (;;) {
       const { value, done } = await reader.read();
-      if (done) return;
+      if (done) return null;
       lastByte = Date.now();
       buf += dec.decode(value, { stream: true });
       let i;
@@ -178,6 +178,10 @@ async function connect() {
           } catch {}
           continue;
         }
+        if (event === 'bye') {
+          await reader.cancel().catch(() => {});
+          try { return JSON.parse(data); } catch { return {}; }
+        }
         if (event === 'comment') {
           // Never silently: the bridge already answered 200 and the page already drew its pin,
           // so a comment lost here is one the user was told had arrived. The frame itself is
@@ -200,21 +204,34 @@ for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   });
 }
 
+/**
+ * This process never exits on its own account, whatever the bridge does. The host starts it once
+ * per session and does not start it again, so a monitor that left when the bridge was stopped, or
+ * when the session ran /disconnect, would leave the next /connect here attached to nothing. A
+ * stopped bridge is waited out on the slow retry, silently - it is not an error - and a session
+ * that disconnected is simply never routed anything by the daemon.
+ */
 let misses = 0;
 let lastRefusal = '';
+let bye = null; // the last stream's goodbye, until a daemon answers again
 for (;;) {
   try {
     await bridge('/register', { body: { key: session.key, pid: session.pid, cwd: session.cwd, repo: session.repo } });
     misses = 0;
     lastRefusal = '';
-    await connect();
-    misses = 0; // the stream ended cleanly; the daemon is probably restarting right now
+    bye = null;
+    bye = await connect();
+    // The stream ended cleanly. Unless its goodbye said the bridge was stopped, the daemon is
+    // probably restarting right now.
+    misses = 0;
   } catch (e) {
     misses++;
     // A daemon that is not up yet is the normal case and stays quiet - never spawn it here. One
-    // that answers and refuses is not, and says why, once.
-    if (e.status && e.message !== lastRefusal) console.error(`ui-comments: the bridge refused: ${e.message}`);
-    if (e.status) lastRefusal = e.message;
+    // that answers and refuses is not, and says why, once. A 503 is a daemon on its way out,
+    // which is the first of those rather than the second.
+    const refused = e.status && e.status !== 503;
+    if (refused && e.message !== lastRefusal) console.error(`ui-comments: the bridge refused: ${e.message}`);
+    if (refused) lastRefusal = e.message;
   }
-  await sleep(misses > FAST_ATTEMPTS ? RETRY_SLOW_MS : RETRY_FAST_MS);
+  await sleep(retryDelay(misses, bye));
 }

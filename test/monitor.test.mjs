@@ -149,6 +149,24 @@ describe('the monitor process', () => {
     assert.equal(w.seq, 3);
   });
 
+  /**
+   * A bridge stopped on purpose - `/disconnect --stop` - rather than one restarting. The monitor
+   * cannot leave, since the host would never start it again, so it waits; but it waits on the slow
+   * retry from the first attempt and says nothing while it does, because a stopped bridge comes
+   * back only when somebody runs /connect. The replacement is started at once here, so a monitor
+   * on the fast retry would be back on it well inside the pause below.
+   */
+  test('waits out a stopped bridge on the slow retry, silently, and comes back to the next one', async () => {
+    const was = bridge;
+    const gone = new Promise((resolve) => was.child.once('exit', resolve));
+    assert.equal((await was.request('/shutdown', { json: {} })).status, 200);
+    await gone;
+    bridge = await startBridge({ tmp: was.dir, port: was.port, env: { LOCAL_ARTIFACT_LISTEN_GRACE_MS: String(GRACE) } });
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(await attached(), 0, 'it came back on the fast retry');
+    await until(attached, 'the monitor to come back to the new bridge', 6000);
+  });
+
   test('says nothing on its own account - every line it writes is a comment', () => {
     assert.equal(err, '');
     assert.equal(out.match(/\[ui-comment/g).length, 3);

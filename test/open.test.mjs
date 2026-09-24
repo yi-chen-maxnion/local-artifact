@@ -165,6 +165,25 @@ describe('scripts/open.mjs', () => {
   });
 
   /**
+   * This session ran /disconnect. Its monitor is still attached - it never leaves - so the rung
+   * above would name whoever holds the browser as though this session had merely lost it, when it
+   * let go on purpose and the way back is its own /connect.
+   */
+  test('in a session that disconnected, says so and names the way back', async () => {
+    const { code, err } = await run([report], {
+      setup: async (key, pid) => {
+        await register(bridge, key, pid);
+        const monitor = await listen(bridge, key);
+        await connect(bridge, key);
+        await bridge.request('/disconnect', { json: { key } });
+        return () => monitor.close();
+      },
+    });
+    assert.equal(code, 3);
+    assert.equal(first(err), 'open: this session is disconnected - run /connect here to take the browser back, then try again');
+  });
+
+  /**
    * The last rung, and the only one this side cannot work out for itself: every precondition is
    * met, the daemon answers, and no extension has ever reached it - so the file would arrive in a
    * browser with no button on it and look exactly like one that worked.

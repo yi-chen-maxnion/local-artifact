@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rateLimiter } from '../lib/common.mjs';
+import { FAST_ATTEMPTS, RETRY_FAST_MS, RETRY_SLOW_MS, rateLimiter, retryDelay } from '../lib/common.mjs';
 
 /** A clock the test moves by hand, so nothing here waits out a real window. */
 function clock() {
@@ -42,5 +42,33 @@ describe('rateLimiter', () => {
     c.tick(100);
     assert.equal(allow(), true); // t+1000: the first one has aged out, the second has not
     assert.equal(allow(), false);
+  });
+});
+
+/**
+ * How soon scripts/monitor.mjs knocks again. The monitor never exits - the host would not start it
+ * again - so a bridge that was stopped on purpose is waited out rather than left, and waited out
+ * slowly: it comes back only when somebody runs /connect.
+ */
+describe('retryDelay', () => {
+  test('a stream that simply ended is retried eagerly, a daemon is probably restarting', () => {
+    assert.equal(retryDelay(0), RETRY_FAST_MS);
+    assert.equal(retryDelay(0, null), RETRY_FAST_MS);
+    assert.equal(retryDelay(FAST_ATTEMPTS), RETRY_FAST_MS);
+  });
+
+  test('a bridge that has not answered for a while is retried slowly', () => {
+    assert.equal(retryDelay(FAST_ATTEMPTS + 1), RETRY_SLOW_MS);
+  });
+
+  test('a goodbye saying the bridge was stopped goes straight to the slow retry', () => {
+    assert.equal(retryDelay(0, { reason: 'shutdown' }), RETRY_SLOW_MS);
+    assert.equal(retryDelay(3, { reason: 'shutdown' }), RETRY_SLOW_MS);
+  });
+
+  // A signal is also how /connect replaces a daemon running older code: the new one is up at once.
+  test('any other goodbye is a restart, and is retried eagerly', () => {
+    assert.equal(retryDelay(0, { reason: 'signal' }), RETRY_FAST_MS);
+    assert.equal(retryDelay(0, {}), RETRY_FAST_MS);
   });
 });

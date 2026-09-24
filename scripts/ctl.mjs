@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { ORIGIN, ROOT, bridge, ensureDaemon, health, openInBrowser, resolveSession, scratchDir, sleep } from '../lib/common.mjs';
-import { extensionLine } from '../lib/format.mjs';
+import {
+  ORIGIN, ROOT, bridge, ensureDaemon, health, openInBrowser, resolveSession, scratchDir, sleep, untilStopped,
+} from '../lib/common.mjs';
+import { extensionLine, stoppedLine } from '../lib/format.mjs';
 
 const cmd = process.argv[2] || 'status';
 const session = resolveSession();
@@ -74,6 +76,7 @@ try {
   h = await bridge('/health', { timeout: 1500 });
 } catch {
   console.log(`bridge     not running (${ORIGIN})`);
+  if (cmd === 'stop') process.exit(0);
   console.log(`session    ${session.key || '(no claude process found)'}  ${session.repo}`);
   console.log('Run /connect to start it.');
   process.exit(0);
@@ -84,20 +87,35 @@ if (!h.sessions) {
   console.log(`bridge     running on ${ORIGIN}, but it did not accept the control token`);
   console.log('It restores its token file within 30 seconds - run this again then.');
 } else if (cmd === 'stop') {
-  console.log('The daemon idle-exits on its own 5 minutes after the last session ends.');
-  console.log(`To stop it now: kill ${h.pid}`);
+  // The daemon's own shutdown rather than a kill: it saves its state, tells every monitor the
+  // bridge was stopped on purpose, and answers with who was connected, so this can say who just
+  // lost their comments. /disconnect --stop is the same thing from inside a session.
+  try {
+    const { sessions } = await bridge('/shutdown', { body: {} });
+    await untilStopped();
+    console.log(`bridge     ${stoppedLine(sessions, session.key)}`);
+  } catch (e) {
+    console.log(`bridge     ${e.status === 503 ? 'already stopping' : `did not stop: ${e.message}`}`);
+    process.exit(e.status === 503 ? 0 : 1);
+  }
 } else {
   console.log(`bridge     ${ORIGIN}  (pid ${h.pid})`);
   console.log(`session    ${session.key || '(no claude process found)'}  ${session.repo}  ${session.cwd}`);
   const me = h.sessions.find((s) => s.key === session.key);
   console.log(`monitor    ${me ? `connected (${me.clients} stream${me.clients === 1 ? '' : 's'})` : 'NOT registered - is the plugin enabled?'}`);
-  console.log(`sessions   ${h.sessions.length} total: ${h.sessions.map((s) => s.repo || s.key).join(', ') || '(none)'}`);
+  const named = (s) => `${s.repo || s.key}${s.detached ? ' (disconnected)' : ''}`;
+  console.log(`sessions   ${h.sessions.length} total: ${h.sessions.map(named).join(', ') || '(none)'}`);
   // Which session an otherwise unbound page goes to. With one session this is noise; with
   // two it is the only thing that answers "where did that comment just go?".
   const primary = h.sessions.find((s) => s.key === h.primary);
-  console.log(`browser    ${h.primary
-    ? (h.primary === session.key ? 'this session' : `${primary?.repo || h.primary} - run /connect here to take it over`)
-    : 'not connected - run /connect'}`);
+  const holder = h.primary ? `comments go to ${primary?.repo || h.primary}` : 'no session receives comments';
+  // A disconnected session is first, because it is the one answer that is this session's own
+  // doing: it will not be handed the browser by anyone else, whoever ends or connects.
+  console.log(`browser    ${me?.detached
+    ? `not this session - disconnected; /connect to take it back (${holder})`
+    : h.primary
+      ? (h.primary === session.key ? 'this session' : `${primary?.repo || h.primary} - run /connect here to take it over`)
+      : 'not connected - run /connect'}`);
   // Directly under the browser line, because it is the other half of the same question: one says
   // which session a comment would reach, this says whether anything can send one.
   console.log(extensionLine(h.extension, ROOT));

@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extensionLine, fmt, slackMessage } from '../lib/format.mjs';
+import { extensionLine, fmt, slackMessage, stoppedLine } from '../lib/format.mjs';
 
 const base = {
   seq: 1, n: 3, previewId: 'abcdef123456', repo: 'web', comment: 'make it blue',
@@ -220,5 +220,32 @@ describe('extensionLine', () => {
 
   test('a clock that has gone backwards reads as now rather than as a negative age', () => {
     assert.equal(extensionLine({ seenAt: now + 5000 }, ROOT, now), 'extension  seen 0s ago');
+  });
+});
+
+/**
+ * The one warning the other sessions get when the bridge is stopped: they are never told. Counted
+ * from what /shutdown answered with, leaving out the session asking and any that had disconnected,
+ * since neither was receiving anything to lose.
+ */
+describe('stoppedLine', () => {
+  test('names the other sessions that lose their comments, not the one asking', () => {
+    const was = [
+      { key: 'p1', repo: 'mine', primary: true },
+      { key: 'p2', repo: 'web' },
+      { key: 'p3', repo: 'api', detached: true },
+      { key: 'p4', repo: '' },
+    ];
+    assert.equal(stoppedLine(was, 'p1'),
+      'stopped the bridge; 2 other sessions lose comments until someone runs /connect: web, p4');
+    assert.equal(stoppedLine(was.slice(0, 2), 'p1'),
+      'stopped the bridge; 1 other session loses comments until someone runs /connect: web');
+  });
+
+  test('with nobody else, says what starts it again', () => {
+    assert.equal(stoppedLine([{ key: 'p1', repo: 'mine' }], 'p1'),
+      'stopped the bridge; no other session was connected - /connect starts it again');
+    assert.equal(stoppedLine([], null),
+      'stopped the bridge; no other session was connected - /connect starts it again');
   });
 });

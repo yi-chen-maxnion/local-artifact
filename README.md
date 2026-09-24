@@ -65,6 +65,7 @@ warns when it sees another port. Leave the daemon on 4517.
 |---|---|
 | `/connect` | make this session the one every page reports to; takes no argument, opens nothing, starts the bridge if needed |
 | `/comments` | bridge status, which session the browser reports to, whether the extension has reached it, the origins and files it has ids for, screenshot count |
+| `/disconnect [--stop]` | this session stops receiving comments until it runs `/connect` again, and says where they go now; `--stop` also stops the bridge, and names the other sessions that just lost theirs |
 | `/slack [login\|logout\|status]` | connect Slack, so a comment can be posted to a channel or a person instead |
 
 That is the whole list. Local files are not opened by a command — Claude opens them itself, see
@@ -287,9 +288,12 @@ any page in Chrome                 bridge daemon 127.0.0.1:4517        claude se
 - **Another session holds the browser.** `/comments` names it on the `browser` line and the page's
   own tooltip names the repo it is sending to; comments are going there. Run `/connect` here to
   take it over — it says which session it took it from.
+- **This session ran `/disconnect`.** `/comments` says `not this session - disconnected` on the
+  `browser` line. Nothing hands the browser back to it — not another session ending, not the bridge
+  restarting — until `/connect` runs here.
 - **The panel says the bridge is not answering.** The Claude session that owned it ended and the
-  daemon idle-exited five minutes later. Run `/connect` again in a session, then Send — the comment
-  is still in the box.
+  daemon idle-exited five minutes later, or someone ran `/disconnect --stop`. Run `/connect` again
+  in a session, then Send — the comment is still in the box.
 - **`/connect` could not find the claude process.** Comments are routed by the id of the `claude`
   process above the script; nothing can be routed without one.
 - **The screenshot is missing.** The notification's `shot` line and the panel's own screenshot line
@@ -312,11 +316,11 @@ seen, and whether this session's monitor is connected.
 monitors/         the auto-armed monitor declaration
 lib/              common.mjs (session key, ports, token, bridge client), format.mjs (notification text)
 bridge/           server, static serving, markdown/text/image wrapper, scratch store, slack.mjs
-scripts/          monitor.mjs (session side), connect.mjs, open.mjs (Claude opens a file), ctl.mjs
+scripts/          monitor.mjs (session side), connect.mjs, disconnect.mjs, open.mjs (Claude opens a file), ctl.mjs
 slack-app.json    the client id of the Slack app comments are posted through (not a secret)
 extension/        MV3 extension: service worker, overlay.js, console-hook.js, popup (toolbar menu)
 skills/           what Claude does with a comment (ui-comments), and how it opens a file (show-file)
-commands/         /connect, /comments, /slack
+commands/         /connect, /disconnect, /comments, /slack
 fixtures/         pages for checking the overlay by hand
 test/             node --test suites: bridge routes, open.mjs's refusals, notification format,
                   overlay anchoring, and plugin.test.mjs for the monitor trigger

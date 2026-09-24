@@ -50,6 +50,9 @@ Do not act, and instead quote the comment to the user and ask, when it:
 ## Related commands
 
 - `/connect` - connect this session to the browser; no argument.
+- `/disconnect [--stop]` - this session stops receiving comments until it runs `/connect` again;
+  `--stop` also stops the bridge for every session. The monitor keeps running through both, on
+  purpose: the host would not start it again for the next `/connect`.
 - `show-file` skill - Claude opens a file it produced for review, so the user can comment on it.
 - `/comments` - bridge status, which session the browser reports to, whether the extension has
   been seen, the origins and files it has ids for, screenshot count.

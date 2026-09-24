@@ -13,6 +13,11 @@ import * as slack from './slack.mjs';
 
 const MAX_BODY = 12 * 1024 * 1024; // a downscaled JPEG is ~150KB; this is slack, not a target
 const IDLE_EXIT_MS = 5 * 60 * 1000;
+/**
+ * How long a shutdown may take before the process leaves anyway. The orderly path is over in a
+ * few milliseconds; this is for a socket that never finishes flushing its goodbye.
+ */
+const SHUTDOWN_HARD_MS = 3000;
 
 /**
  * Identifies this daemon process. A monitor outlives daemon restarts, so it cannot rely on
@@ -30,7 +35,7 @@ const INSTANCE = shortId(6);
  * is written to TOKEN_FILE once the port is ours.
  */
 const TOKEN = shortId(16);
-const CONTROL = new Set(['/register', '/open', '/connect', '/events']);
+const CONTROL = new Set(['/register', '/open', '/connect', '/disconnect', '/shutdown', '/events']);
 const BUILD = codeBuild(ROOT);
 
 /**
@@ -95,6 +100,24 @@ const commentRate = new Map(); // sessionKey -> limiter, dropped with the sessio
  * the overlay names the repo it is sending to so the answer is visible rather than guessed.
  */
 let primaryKey = null;
+/**
+ * Sessions that ran `/disconnect`, key -> pid, and are never handed the browser until they run
+ * `/connect` again.
+ *
+ * This is the daemon's state rather than the monitor's because the monitor cannot stop: the host
+ * starts it the first time `/connect` runs, and restarting one that exited is nothing it promises,
+ * so a monitor that went away on disconnect would leave a later `/connect` in the same session
+ * connected to nothing. It stays attached instead, and nothing is routed to it because it is not
+ * primary. The trap that leaves is `/register`, which the monitor sends on every reconnect and
+ * which hands the browser to whoever registers when nobody holds it - so the opt-out is written
+ * here, and to the state file, where a reconnect after a restart still finds it.
+ *
+ * The pid is kept beside the key so an entry goes with its session: a key is a pid, and a pid
+ * comes round again.
+ */
+const detached = new Map();
+/** Set once a shutdown has begun: from then on every request is refused. See `shutdown`. */
+let stopping = false;
 
 function send(res, code, type, body, headers = {}) {
   res.writeHead(code, {
@@ -206,6 +229,7 @@ function saveState() {
     writeFileAtomic(STATE_FILE, JSON.stringify({
       seq, primaryKey, extensionSeenAt, extensionId,
       previews: [...previews.entries()], counters: store.counters(),
+      detached: [...detached.entries()],
     }));
   } catch {}
 }
@@ -229,6 +253,14 @@ function loadState() {
   // existing because this process was restarted, and a restart must not report it as NOT SEEN.
   extensionSeenAt = Number(raw.extensionSeenAt) || 0;
   extensionId = EXTENSION_ID.test(String(raw.extensionId || '')) ? raw.extensionId : '';
+  // Only the sessions still alive: an ended one has nothing left to opt out of, and its pid may
+  // already belong to someone else.
+  for (const [key, pid] of Array.isArray(raw.detached) ? raw.detached : []) {
+    if (SESSION_KEY.test(String(key)) && pidAlive(Number(pid))) detached.set(key, Number(pid));
+  }
+  // Never written that way, since a disconnect hands the browser on first - but a file that says
+  // so would otherwise route comments to a session that asked for none.
+  if (detached.has(primaryKey)) primaryKey = null;
   const kept = [];
   // Rebuilt field by field rather than taken as it was written: a state file from before records
   // lost their session carries `sessionKey`, `sessionPid`, `claimed` and `claimedAt`, and reading
@@ -419,8 +451,23 @@ const originPreview = (origin) => previewFor((pv) => pv.origin === origin, { ori
  */
 const connectedSession = () => (primaryKey && sessions.has(primaryKey) ? primaryKey : null);
 
+/**
+ * Who the browser passes to when its holder lets go of it, by ending or by `/disconnect`: the
+ * remaining session that registered most recently, leaving out every one that asked not to be.
+ */
+const successor = () => [...sessions.values()]
+  .filter((s) => !detached.has(s.key))
+  .sort((a, b) => b.at - a.at)[0]?.key || null;
+
 function pruneSessions() {
   let changed = false;
+  // Before the sessions, and separately: a detached session need not be registered at all - its
+  // monitor may not have come back since a restart - and its entry still has to go when it ends.
+  for (const [key, pid] of detached) {
+    if (pidAlive(pid)) continue;
+    changed = true;
+    detached.delete(key);
+  }
   for (const [key, s] of sessions) {
     if (pidAlive(s.pid)) continue;
     changed = true;
@@ -434,10 +481,8 @@ function pruneSessions() {
   }
   if (!changed) return;
   // The browser does not go unowned because its owner ended: it passes to whichever remaining
-  // session registered most recently.
-  if (!sessions.has(primaryKey)) {
-    primaryKey = [...sessions.values()].sort((a, b) => b.at - a.at)[0]?.key || null;
-  }
+  // session registered most recently, unless that session has disconnected.
+  if (!sessions.has(primaryKey)) primaryKey = successor();
   saveState();
 }
 
@@ -480,6 +525,9 @@ const server = http.createServer(async (req, res) => {
   if (p !== '/resolve') lastActivity = Date.now();
 
   try {
+    // Whatever it is: the state has been written, and anything changed now would be lost with it.
+    if (stopping) return send(res, 503, 'application/json; charset=utf-8',
+      JSON.stringify({ error: 'the bridge is shutting down' }), { connection: 'close' });
     if (!HOSTS.has(req.headers.host)) return json(res, 421, { error: 'unexpected host' });
     // Before the routes, because it is about the caller rather than about the route: any request
     // the extension makes is a sighting, including the ones that are then refused.
@@ -495,7 +543,9 @@ const server = http.createServer(async (req, res) => {
         primary: primaryKey, slack: slack.status(),
         // Null for never, which is what every command turns into "install the extension".
         extension: extensionSeenAt ? { seenAt: extensionSeenAt, id: extensionId } : null,
-        sessions: [...sessions.values()].map((s) => ({ ...s, clients: clients.get(s.key)?.size || 0 })),
+        sessions: [...sessions.values()].map((s) => ({
+          ...s, clients: clients.get(s.key)?.size || 0, detached: detached.has(s.key),
+        })),
         previews: [...previews.entries()].map(([id, v]) => ({
           id, target: v.target, kind: v.kind, origin: v.origin || undefined,
         })),
@@ -516,8 +566,10 @@ const server = http.createServer(async (req, res) => {
         key: b.key, pid, cwd: String(b.cwd || ''), repo: String(b.repo || ''), at: Date.now(),
       });
       // A monitor reconnecting is not a setup gesture, so it does not steal the browser from
-      // another session - but if nothing holds it, someone has to.
-      if (!sessions.has(primaryKey)) primaryKey = b.key;
+      // another session - but if nothing holds it, someone has to. Not a session that ran
+      // /disconnect: its monitor stays attached and re-registers on every reconnect, and taking
+      // the browser here would undo the disconnect the first time the stream dropped.
+      if (!sessions.has(primaryKey) && !detached.has(b.key)) primaryKey = b.key;
       return json(res, 200, { ok: true, previews: previews.size });
     }
 
@@ -539,13 +591,66 @@ const server = http.createServer(async (req, res) => {
       pruneSessions();
       const prior = before !== b.key && sessions.has(before) ? sessions.get(before) : null;
       // The whole of the setup gesture: from now on this session owns the browser, and every
-      // comment from every page goes to it.
+      // comment from every page goes to it. It is also the only way back from /disconnect.
+      detached.delete(b.key);
       primaryKey = b.key;
       saveState();
       return json(res, 200, {
         ok: true,
         primary: primaryKey,
         previous: prior ? { key: prior.key, repo: prior.repo } : null,
+      });
+    }
+
+    /**
+     * `/disconnect`: this session stops receiving comments, and stays that way until it runs
+     * `/connect`. If it held the browser, the browser passes on as it would had the session ended.
+     *
+     * The session's monitor is not told and does not stop - see `detached` for why it cannot - so
+     * all of this is the daemon's to remember. A session that was never registered is marked all
+     * the same: its monitor may simply not have come back since a restart, and it would otherwise
+     * be handed the browser the moment it did.
+     */
+    if (p === '/disconnect' && req.method === 'POST') {
+      const b = await readBody(req);
+      const key = String(b.key);
+      const pid = Number(key.slice(1));
+      if (!SESSION_KEY.test(key) || !pidAlive(pid)) {
+        return json(res, 400, { error: 'a valid session key with a live pid is required' });
+      }
+      pruneSessions();
+      const already = detached.has(key);
+      const held = primaryKey === key;
+      detached.set(key, pid);
+      if (held) primaryKey = successor();
+      saveState();
+      const now = connectedSession();
+      return json(res, 200, {
+        ok: true, already, held, registered: sessions.has(key),
+        primary: now ? { key: now, repo: sessions.get(now).repo } : null,
+      });
+    }
+
+    /**
+     * Stopping the daemon, from this machine's side: `/disconnect --stop` and `ctl.mjs stop`.
+     *
+     * Answered before anything closes, and with every session that was registered, because the
+     * caller is about to say which other sessions just lost their comments - and a caller whose
+     * request was cut off by the very shutdown it asked for could say nothing at all. Every request
+     * after this one is refused.
+     */
+    if (p === '/shutdown' && req.method === 'POST') {
+      await readBody(req);
+      pruneSessions();
+      const was = [...sessions.values()].map((s) => ({
+        key: s.key, repo: s.repo, primary: s.key === primaryKey, detached: detached.has(s.key),
+      }));
+      stopping = true;
+      const go = () => shutdown('shutdown');
+      res.once('finish', go);
+      res.once('close', go);
+      return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: true, sessions: was }), {
+        connection: 'close',
       });
     }
 
@@ -945,12 +1050,63 @@ function writeToken() {
   try { writeFileAtomic(TOKEN_FILE, TOKEN, 0o600); } catch (e) { console.error(`token: ${e.message}`); }
 }
 
-setInterval(() => {
+const housekeeping = setInterval(() => {
   pruneSessions();
   // A temp-directory cleaner can take the token file out from under a long-lived daemon.
   if (readToken() !== TOKEN) writeToken();
-  if (sessions.size === 0 && Date.now() - lastActivity > IDLE_EXIT_MS) process.exit(0);
-}, 30000).unref();
+  if (sessions.size === 0 && Date.now() - lastActivity > IDLE_EXIT_MS) shutdown('idle');
+}, 30000);
+housekeeping.unref();
+
+/**
+ * The one way this daemon ends once it has served anything: `/shutdown`, a signal, or idling out.
+ *
+ * In this order, and each step for a reason. New requests are refused first, so nothing lands
+ * after the state is written. The state is written before any stream is touched, so what a
+ * restart reads is what this process last knew. Every monitor is told `bye` with the reason
+ * before its stream ends, because an ended stream on its own looks exactly like a daemon that
+ * crashed and is coming straight back - which a monitor answers with a burst of fast retries -
+ * where a stopped bridge will be back only when someone runs /connect. The listener and the
+ * connections close only once those goodbyes have been flushed. The token file goes last, and
+ * only while it is still this process's: a daemon started the moment the port came free has
+ * written its own there.
+ *
+ * Idempotent, since a signal can arrive in the middle of a /shutdown. The hard exit is for the
+ * one thing that can hang it - a socket that never finishes flushing - and exits 0 as well,
+ * since the state was saved before anything could hang.
+ */
+let closing = false;
+function shutdown(reason) {
+  if (closing) return;
+  closing = true;
+  stopping = true;
+  setTimeout(finish, SHUTDOWN_HARD_MS).unref();
+  clearInterval(housekeeping);
+  saveState();
+  const bye = `event: bye\ndata: ${JSON.stringify({ reason })}\n\n`;
+  const flushed = [];
+  for (const set of clients.values()) {
+    for (const res of set) {
+      flushed.push(new Promise((resolve) => {
+        res.once('finish', resolve);
+        res.once('close', resolve);
+        try { res.end(bye); } catch { resolve(); }
+      }));
+    }
+  }
+  clients.clear();
+  server.close(finish);
+  Promise.all(flushed).then(() => server.closeAllConnections());
+}
+
+function finish() {
+  try { if (readToken() === TOKEN) fs.rmSync(TOKEN_FILE, { force: true }); } catch {}
+  process.exit(0);
+}
+
+// `signal` rather than `shutdown`: a signal is also how /connect replaces a daemon running older
+// code, and the monitors should be back on the new one in a moment rather than on the slow retry.
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => shutdown('signal'));
 
 loadState();
 
