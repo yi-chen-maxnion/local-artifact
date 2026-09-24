@@ -21,6 +21,13 @@ const BRIDGE = 'http://127.0.0.1:4517';
 // the old script. scripts/ rewrites this line on release; test/ checks it against manifest.json.
 const BUILD = '0.1.0';
 
+/**
+ * This worker's lifetime, told apart from every other one's. It goes into each overlay it injects,
+ * which hands it back when asked: that is how the worker knows a page is carrying ITS overlay and
+ * not one from before a reload, which may still be sitting in the same world - see overlay.js.
+ */
+const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
 /** Self-update state; see `maybeUpdate` below. Up here because `call` reads it on every request. */
 let inFlight = 0; // requests to the bridge of this worker's own that have not come back
 let updateWhenIdle = false; // an update waited for the last of them
@@ -67,7 +74,9 @@ async function resolveOrigin(origin) {
   // here and cached as one.
   const answer = await call(`/resolve?origin=${encodeURIComponent(origin)}`);
   const value = answer?.error ? null : answer;
-  resolved.set(origin, { at: Date.now(), value });
+  // The bridge's reason is kept with the miss, for the one caller that has to say why a tab went
+  // without an overlay - see `rebindAll`.
+  resolved.set(origin, { at: Date.now(), value, why: answer?.error || '' });
   return value;
 }
 
@@ -77,20 +86,26 @@ async function resolveOrigin(origin) {
  * The origin is the whole of the question: nothing in the address bar says which session a tab
  * belongs to, so every tab on an origin is bound the same way and a link that opens a second one
  * is part of the loop like the first.
+ *
+ * `replace` says any overlay already in the tab's world is from before this worker's extension was
+ * loaded, and is to be taken down rather than left to answer for the page; only the walk after a
+ * reload knows that. Resolves to `{ binding }`, or to `{ why }` - with `final` where trying again
+ * could not change the answer.
  */
-async function ensureBound(tabId, url) {
+async function ensureBound(tabId, url, { replace = false } = {}) {
   await ready;
   const origin = originOf(url);
-  if (!origin || disabled.has(origin)) return null;
+  if (!origin) return { why: 'not an http(s) page', final: true };
+  if (disabled.has(origin)) return { why: 'comments are turned off for this site', final: true };
   // The bridge serves the user's own files under /p/, and those are pages to comment on like any
   // other. Its remaining pages are notices it writes itself - /slack/callback says a login worked
   // - where there is nothing of the user's to point at.
-  if (origin === BRIDGE && !new URL(url).pathname.startsWith('/p/')) return null;
+  if (origin === BRIDGE && !new URL(url).pathname.startsWith('/p/')) return { why: 'a page of the bridge\'s own', final: true };
 
   let binding = bound.get(tabId);
   if (!binding || binding.origin !== origin) {
     const found = await resolveOrigin(origin);
-    if (!found) return null;
+    if (!found) return { why: `the bridge has no binding for it (${resolved.get(origin)?.why || 'no answer'})` };
     binding = {
       previewId: found.previewId,
       repo: found.repo || '',
@@ -118,18 +133,19 @@ async function ensureBound(tabId, url) {
         target,
         func: (cfg) => { window.__ccConfig = cfg; },
         args: [{
-          previewId: binding.previewId, origin: BRIDGE, repo: binding.repo, slack: binding.slack, build: BUILD,
+          previewId: binding.previewId, origin: BRIDGE, repo: binding.repo, slack: binding.slack,
+          build: BUILD, instance: INSTANCE, replace,
         }],
       }),
       chrome.scripting.executeScript({ target, world: 'MAIN', files: ['console-hook.js'] }),
     ]);
     await chrome.scripting.executeScript({ target, files: ['overlay.js'] });
-  } catch {
+  } catch (e) {
     // chrome:// pages, the web store, a tab that navigated away mid-flight. Not an error.
-    return null;
+    return { why: `the injection failed (${e?.message || e})` };
   }
   paintBadge(tabId, origin);
-  return binding;
+  return { binding };
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -274,19 +290,67 @@ chrome.runtime.onInstalled.addListener(sayHello);
  * Pages that were open when this extension was installed or reloaded - by an update, most of the
  * time - get an overlay now rather than on their next load. A reload leaves each one holding the
  * old overlay's DOM with its script cut off from this worker, and injects nothing by itself; the
- * new overlay takes the old one's place (see the top of overlay.js). `bound` is empty after a
- * reload, so every http(s) tab is asked about, one at a time, so that a window full of tabs on one
- * origin asks the bridge once and the rest are answered from the cache.
+ * new overlay takes the old one's place (see the top of overlay.js), and the old one takes itself
+ * down within seconds whether or not a new one arrives. So a page this misses is left with no
+ * overlay at all, silently, until it is reloaded by hand.
+ *
+ * Hence the rounds. The daemon that has just written a new version into the folder is often a new
+ * daemon, which knows no session until the session's monitor registers again - up to seconds
+ * later - and answers /resolve with "no session" meanwhile; a page may also be mid-load and refuse
+ * the injection. Each round asks every tab not yet done, with the misses forgotten, and a tab is
+ * done only when the overlay in it answers with this worker's INSTANCE. The last round ends about
+ * twenty seconds in, inside the half minute an idle worker is given; a tab still without one is
+ * named in the console, with the reason.
+ *
+ * Registered at the top level, as every listener here is: a worker woken by an event only hears
+ * it through a listener added synchronously on start-up.
  */
-chrome.runtime.onInstalled.addListener(async (details) => {
+const REBIND_ROUNDS_MS = [0, 1000, 2000, 3000, 5000, 8000];
+
+/** Whether the overlay in this tab is one this worker put there - asked, not assumed. */
+async function carriesOurs(tabId) {
+  try {
+    const answer = await Promise.race([
+      Promise.resolve().then(() => chrome.tabs.sendMessage(tabId, { type: 'cc-busy?' }, { frameId: 0 })),
+      sleep(1000).then(() => null),
+    ]);
+    return answer?.instance === INSTANCE;
+  } catch { return false; }
+}
+
+async function rebindAll() {
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({}); } catch {}
+  let todo = tabs.filter((t) => t.id && originOf(t.url || '')).map((t) => ({ id: t.id, url: t.url, why: '' }));
+  let total = todo.length;
+  for (const wait of REBIND_ROUNDS_MS) {
+    if (!todo.length) break;
+    if (wait) await sleep(wait);
+    resolved.clear();
+    const next = [];
+    for (const t of todo) {
+      const now = await chrome.tabs.get(t.id).catch(() => null);
+      // Closed, or gone somewhere else - where the load itself binds it.
+      if (!now || now.url !== t.url) { total -= 1; continue; }
+      if (await carriesOurs(t.id)) continue;
+      const r = await ensureBound(t.id, t.url, { replace: true });
+      if (r.binding && await carriesOurs(t.id)) continue;
+      // A site turned off, a page of the bridge's own: never owed an overlay, and not counted.
+      if (r.final) { total -= 1; continue; }
+      t.why = r.why || 'the overlay was injected and did not answer';
+      next.push(t);
+    }
+    todo = next;
+  }
+  say(`overlays back on ${total - todo.length} of ${total} open tab(s)${todo.length
+    ? `; not on ${todo.map((t) => `${t.id} ${originOf(t.url)}: ${t.why}`).join('; ')}` : ''}`);
+}
+
+chrome.runtime.onInstalled.addListener((details) => {
   const reason = details?.reason;
   if (reason !== 'install' && reason !== 'update') return;
   if (reason === 'update') say(`now running ${BUILD} (was ${details.previousVersion || 'unknown'})`);
-  let tabs = [];
-  try { tabs = await chrome.tabs.query({}); } catch {}
-  for (const t of tabs) {
-    if (t.id && originOf(t.url || '')) await ensureBound(t.id, t.url);
-  }
+  rebindAll();
 });
 
 async function sendComment(payload) {

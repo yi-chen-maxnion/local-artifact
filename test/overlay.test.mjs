@@ -957,7 +957,9 @@ describe('updates: one overlay per page, and an old one leaves', () => {
       first.addEventListener('cc-overlay-replace', () => { told += 1; });
       w.inject();
       assert.equal(told, 0);
-      assert.deepEqual(hosts(w), [first]);
+      // Identity, not deepEqual: two host <div>s have no own properties to tell them apart by.
+      assert.equal(hosts(w).length, 1);
+      assert.equal(hosts(w)[0], first, 'the first overlay was replaced');
       assert.equal((await w.tell({ type: 'cc-busy?' }))?.busy, false, 'the first overlay stopped answering');
       assert.equal(w.chrome.runtime.onMessage.listeners.length, 1);
     } finally { await w.close(); }
@@ -1031,6 +1033,88 @@ describe('updates: one overlay per page, and an old one leaves', () => {
       w.document.dispatchEvent(new w.window.Event('visibilitychange'));
       assertGone(w);
     } finally { await w.close(); }
+  });
+
+  /**
+   * After a reload Chrome may run the new injection in the world the old overlay ran in, where its
+   * global is still set. Stopping at that global left the page with no overlay once the old one,
+   * cut off from its worker, took itself down. These are the same window, injected twice: the
+   * first overlay plays the one from before the reload.
+   */
+  describe('a second injection into the same world', () => {
+    const again = (w, config) => {
+      w.window.__ccConfig = { previewId: 'abcdef1234', origin: 'http://127.0.0.1:4317', repo: 'repo', ...config };
+      w.inject();
+    };
+    const answer = async (w) => ({ ...await w.tell({ type: 'cc-busy?' }) });
+
+    test('told to replace, it takes the old overlay down and is the one live overlay', async () => {
+      const w = await overlayWindow({ config: { build: '1.0.0', instance: 'old' }, keepHost: true });
+      try {
+        const first = hosts(w)[0];
+        again(w, { build: '1.0.1', instance: 'new', replace: true });
+        assert.equal(first.isConnected, false, 'the old host is still on the page');
+        assert.equal(hosts(w).length, 1);
+        assert.equal(hosts(w)[0].dataset.build, '1.0.1');
+        // The old one's listeners are the ones recorded, and all of them are gone.
+        assert.deepEqual(w.listeners.filter((l) => !l.options?.signal?.aborted).map((l) => l.type), []);
+        assert.equal(w.chrome.runtime.onMessage.listeners.length, 1);
+        assert.deepEqual(await answer(w), { busy: false, build: '1.0.1', instance: 'new' });
+        assert.equal(w.window.__ccOverlay?.instance, 'new');
+      } finally { await w.close(); }
+    });
+
+    test('an old overlay that is dead is replaced without being told to', async () => {
+      const w = await overlayWindow({ config: { build: '1.0.0', instance: 'old' }, keepHost: true });
+      try {
+        w.chrome.runtime.id = '';
+        again(w, { build: '1.0.1', instance: 'new' });
+        w.chrome.runtime.id = 'testextensionid';
+        assert.equal(hosts(w).length, 1);
+        assert.equal(hosts(w)[0].dataset.build, '1.0.1');
+        assert.equal((await answer(w)).instance, 'new');
+      } finally { await w.close(); }
+    });
+
+    test('one left by a build whose global was a bare string is replaced', async () => {
+      const w = await overlayWindow({
+        html: '<!doctype html><html><body><div id="cc-overlay-host"></div></body></html>',
+        config: { build: '1.0.1', instance: 'new' },
+        keepHost: true,
+        before: (win) => { win.__ccOverlay = '0.1.0'; },
+      });
+      try {
+        assert.equal(hosts(w).length, 1);
+        assert.equal(hosts(w)[0].dataset.build, '1.0.1');
+        assert.equal((await answer(w)).instance, 'new');
+      } finally { await w.close(); }
+    });
+
+    test('a live one from another lifetime of the worker, not told to replace, is kept', async () => {
+      // A worker that slept and woke, then saw the page complete a load again: the overlay there
+      // works, and may hold a comment being written.
+      const w = await overlayWindow({ config: { build: '1.0.1', instance: 'before-sleep' }, keepHost: true });
+      try {
+        const first = hosts(w)[0];
+        again(w, { build: '1.0.1', instance: 'after-sleep' });
+        // Identity, not deepEqual: two host <div>s have no own properties to tell them apart by.
+        assert.equal(hosts(w).length, 1);
+        assert.equal(hosts(w)[0], first, 'the first overlay was replaced');
+        assert.equal((await answer(w)).instance, 'before-sleep');
+      } finally { await w.close(); }
+    });
+
+    test('the same lifetime of the worker never replaces its own overlay, even told to', async () => {
+      // A retry of the walk after a reload, reaching a tab its first round already covered.
+      const w = await overlayWindow({ config: { build: '1.0.1', instance: 'same', replace: true }, keepHost: true });
+      try {
+        const first = hosts(w)[0];
+        again(w, { build: '1.0.1', instance: 'same', replace: true });
+        // Identity, not deepEqual: two host <div>s have no own properties to tell them apart by.
+        assert.equal(hosts(w).length, 1);
+        assert.equal(hosts(w)[0], first, 'the first overlay was replaced');
+      } finally { await w.close(); }
+    });
   });
 
   test('cc-busy? is yes with unsent text in the panel, and no otherwise', async () => {

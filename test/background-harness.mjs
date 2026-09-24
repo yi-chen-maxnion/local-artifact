@@ -101,6 +101,10 @@ const BRIDGE = 'http://127.0.0.1:4517';
  *   `/resolve`.
  * - `tabs`: `{ id, url, overlay }`, where `overlay(msg)` is what the tab's content script answers,
  *   and a tab without one has nothing listening - the message fails the way Chrome fails it.
+ *   Injecting overlay.js gives a tab an overlay that answers as the real one does, with the build
+ *   and instance of the config injected just before it - unless the tab has `swallow` left, a
+ *   count of injections that run and leave nothing answering (the new script stopping at an old
+ *   overlay's global, say), or `refuse`, the message an injection into it throws with.
  * - `store` and `clock` are shared between workers to play one that reloads into the next.
  */
 export async function startWorker({
@@ -187,7 +191,20 @@ export async function startWorker({
       onActivated: event(),
     },
     scripting: {
-      executeScript: async (inj) => { w.injections.push(inj); return []; },
+      executeScript: async (inj) => {
+        w.injections.push(inj);
+        const t = tabById(inj.target?.tabId);
+        if (t?.refuse) throw new Error(t.refuse);
+        if (t && inj.args) t.config = inj.args[0];
+        if (t && inj.files?.includes('overlay.js')) {
+          if (t.swallow > 0) t.swallow -= 1;
+          else {
+            const { build, instance } = t.config || {};
+            t.overlay = (msg) => (msg?.type === 'cc-busy?' ? { busy: false, build, instance } : undefined);
+          }
+        }
+        return [];
+      },
     },
     storage: {
       local: {
@@ -220,6 +237,13 @@ export async function startWorker({
     console: { log: say, info: say, warn: say, error: say, debug: say },
   });
   vm.runInContext(WORKER_SRC, context, { filename: 'extension/background.js' });
+  // Counted before anything is awaited: a worker woken by an event hears it only through a
+  // listener it added synchronously as it started.
+  w.atStart = {
+    onInstalled: chrome.runtime.onInstalled.listeners.length,
+    onMessage: chrome.runtime.onMessage.listeners.length,
+    onUpdated: chrome.tabs.onUpdated.listeners.length,
+  };
 
   /** A message from one of the extension's own pages, answered the way the worker answers it. */
   w.ask = (type, payload) => new Promise((resolve) => {

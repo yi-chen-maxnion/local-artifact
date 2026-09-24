@@ -200,31 +200,112 @@ describe('the bridge says when the folder has moved on', () => {
 });
 
 describe('after a reload, open pages get an overlay again', () => {
-  const tabs = [
+  // Made afresh per test: the fake gives a tab a new overlay when one is injected into it.
+  const openTabs = () => [
     tab(1, 'http://localhost:5173/app'),
     tab(2, 'https://example.com/x'),
     { id: 3, url: 'chrome://extensions/' },
     { id: 4, url: 'file:///tmp/a.html' },
   ];
   const overlaid = (w) => w.injections.filter((i) => i.files?.includes('overlay.js')).map((i) => i.target.tabId);
+  const configs = (w) => w.injections.filter((i) => i.args).map((i) => i.args[0]);
+  const summary = (w) => w.logs.find((l) => l.includes('overlays back on')) || '';
 
-  test('onInstalled with reason update injects into every http(s) tab, with the build', async () => {
-    const w = await startWorker({ tabs });
+  test('every listener is added as the worker starts, before anything is awaited', async () => {
+    const w = await startWorker();
+    // sayHello and the walk below; the message router; the page-load binder.
+    assert.deepEqual({ ...w.atStart }, { onInstalled: 2, onMessage: 1, onUpdated: 1 });
+  });
+
+  test('onInstalled with reason update injects into every http(s) tab, and says to replace', async () => {
+    const w = await startWorker({ tabs: openTabs() });
     w.chrome.runtime.onInstalled.fire({ reason: 'update', previousVersion: '0.0.9' });
     await w.advance(100);
     assert.deepEqual(overlaid(w).sort(), [1, 2]);
-    const configs = w.injections.filter((i) => i.args).map((i) => i.args[0]);
-    assert.ok(configs.length >= 2 && configs.every((c) => c.build === RUNNING), JSON.stringify(configs));
+    const cfgs = configs(w);
+    assert.ok(cfgs.length === 2 && cfgs.every((c) => c.build === RUNNING && c.replace === true && c.instance),
+      JSON.stringify(cfgs));
     assert.ok(w.logs.some((l) => l.includes(`now running ${RUNNING}`)), w.logs.join('\n'));
+    assert.match(summary(w), /overlays back on 2 of 2 open tab/);
+  });
+
+  test('a page load injects with the same instance and does not say to replace', async () => {
+    const tabs = openTabs();
+    const w = await startWorker({ tabs });
+    w.chrome.runtime.onInstalled.fire({ reason: 'update' });
+    await w.advance(100);
+    const walk = configs(w)[0];
+    w.chrome.tabs.onUpdated.fire(1, { status: 'complete' }, tabs[0]);
+    await w.advance(100);
+    const load = configs(w).at(-1);
+    assert.equal(load.instance, walk.instance);
+    assert.equal(load.replace, false);
   });
 
   test('and on install; but not when Chrome itself updated', async () => {
-    const w = await startWorker({ tabs });
+    const w = await startWorker({ tabs: openTabs() });
     w.chrome.runtime.onInstalled.fire({ reason: 'chrome_update' });
     await w.advance(100);
     assert.deepEqual(overlaid(w), []);
     w.chrome.runtime.onInstalled.fire({ reason: 'install' });
     await w.advance(100);
     assert.deepEqual(overlaid(w).sort(), [1, 2]);
+  });
+
+  /**
+   * What left a real page with no overlay after an update: the daemon that wrote the new version
+   * was a new daemon, which answers "no session" until the session's monitor registers with it
+   * again, and the walk asked it in that moment. The old overlay took itself down on schedule,
+   * and nothing came to replace it.
+   */
+  test('a bridge that knows no session yet is asked again until it does', async () => {
+    let session = false;
+    const w = await startWorker({
+      tabs: [tab(1, 'http://127.0.0.1:4517/p/abc/')],
+      bridge: (route) => (route.startsWith('/resolve')
+        ? (session ? { status: 200, body: { previewId: 'p1', repo: 'repo' } } : { status: 404, body: { error: 'no session is set up' } })
+        : { status: 200, body: {} }),
+    });
+    w.chrome.runtime.onInstalled.fire({ reason: 'update' });
+    await w.advance(500);
+    assert.deepEqual(overlaid(w), [], 'injected without a binding');
+    session = true; // the monitor has registered with the new daemon
+    // The next round, a second in, asks again rather than reading the miss it cached.
+    await w.advance(1000);
+    assert.deepEqual(overlaid(w), [1]);
+    await w.advance(30_000);
+    assert.deepEqual(overlaid(w), [1]);
+    assert.match(summary(w), /overlays back on 1 of 1 open tab/);
+  });
+
+  test('an injection that leaves no answering overlay is made again', async () => {
+    const w = await startWorker({ tabs: [{ ...tab(1, 'http://localhost:5173/'), swallow: 1 }] });
+    w.chrome.runtime.onInstalled.fire({ reason: 'update' });
+    await w.advance(30_000);
+    assert.deepEqual(overlaid(w), [1, 1]);
+    assert.match(summary(w), /overlays back on 1 of 1 open tab/);
+  });
+
+  test('a tab it cannot rebind is named in the console with the reason, after a bounded wait', async () => {
+    const w = await startWorker({
+      tabs: [tab(1, 'http://localhost:5173/')],
+      bridge: (route) => (route.startsWith('/resolve')
+        ? { status: 404, body: { error: 'no session is set up' } } : { status: 200, body: {} }),
+    });
+    w.chrome.runtime.onInstalled.fire({ reason: 'update' });
+    await w.advance(25_000);
+    assert.match(summary(w), /overlays back on 0 of 1 open tab\(s\); not on 1 http:\/\/localhost:5173: .*no session is set up/);
+    const asked = w.requests.filter((r) => r.route.startsWith('/resolve')).length;
+    await w.advance(120_000);
+    assert.equal(w.requests.filter((r) => r.route.startsWith('/resolve')).length, asked, 'it kept asking');
+    assert.ok(asked > 1 && asked <= 6, `${asked} lookups`);
+  });
+
+  test('a site turned off is neither injected into nor counted', async () => {
+    const w = await startWorker({ tabs: openTabs(), store: { off: ['https://example.com'] } });
+    w.chrome.runtime.onInstalled.fire({ reason: 'update' });
+    await w.advance(30_000);
+    assert.deepEqual(overlaid(w), [1]);
+    assert.match(summary(w), /overlays back on 1 of 1 open tab\(s\)$/);
   });
 });

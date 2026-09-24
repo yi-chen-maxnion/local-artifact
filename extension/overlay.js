@@ -7,18 +7,15 @@
  * comment through it.
  */
 (() => {
-  // A second injection into the same world - the worker injects on every completed load - finds
-  // the first one still running and stops. Only this world's own global can say that: the host
-  // element is in the page's DOM, where the page can write any attribute it likes, and where an
-  // overlay from an extension that has since been reloaded leaves a host behind for good.
-  if (window.__ccOverlay) return;
-
   /** Written into this world by the service worker, immediately before this file is injected. */
   const cfg = (() => {
     const w = window.__ccConfig || {};
     return {
       /** The worker's own version, written on the host for whoever inspects the page. */
       build: typeof w.build === 'string' ? w.build : '',
+      /** Which lifetime of the worker injected this, and whether it says to replace what is here. */
+      instance: typeof w.instance === 'string' ? w.instance : '',
+      replace: w.replace === true,
       previewId: w.previewId || null,
       origin: w.origin || null,
       // Which session this page is talking to. It used to be implicit - you had just named this
@@ -29,13 +26,33 @@
       slack: w.slack?.connected ? w.slack : null,
     };
   })();
-  // Without either one there is no session to speak for and no bridge to reach, so draw nothing.
+  // Without either one there is no session to speak for and no bridge to reach, so draw nothing -
+  // and take nothing down either.
   if (!cfg.previewId || !cfg.origin) return;
 
   /**
-   * A host already on the page is not this world's, or the check above would have stopped here:
-   * it is what an overlay from before the extension reloaded left behind - reloading gives this
-   * file a fresh world and leaves the old DOM where it was, its script cut off from the worker.
+   * An overlay already running in THIS world. The worker injects on every completed load, so a
+   * second injection from the same worker is normal and simply stops here: the one running keeps
+   * the page, and whatever is being written in it.
+   *
+   * It is not always that. After the extension reloads, Chrome may run the new injection in the
+   * world the old overlay ran in, with the old overlay's global still set - and an overlay that
+   * stopped at that global would leave the page with none at all once the old one, cut off from
+   * its worker, takes itself down. So what is here is replaced when the worker says every overlay
+   * in the tab predates it (`replace`, sent only by the walk after a reload), when it is gone dead,
+   * or when it is from a version too old to say either - the global was a bare string then. The
+   * only thing that can see this global is this world, never the page.
+   */
+  const prior = window.__ccOverlay;
+  if (prior && typeof prior === 'object'
+      && (prior.instance === cfg.instance || (!cfg.replace && prior.alive?.()))) return;
+  try { if (typeof prior === 'object') prior?.teardown?.(); } catch {}
+
+  /**
+   * A host still on the page belongs to no live overlay of this world's - one would have stopped
+   * this above, and one replaced there took its host with it. It is what an overlay from before the
+   * extension reloaded left behind: reloading usually gives this file a fresh world and leaves the
+   * old DOM where it was, its script cut off from the worker.
    * Left in place it would block this overlay for the life of the page, so it is asked to take
    * itself down (its listeners are in its own world, where only it can remove them) and removed.
    * One from 0.1.0 does not listen for that and is simply removed. Its classes on <html> go too:
@@ -47,7 +64,12 @@
     stale.remove();
     document.documentElement.classList.remove('cc-pick', 'cc-pick-text');
   }
-  window.__ccOverlay = cfg.build || true;
+  // What a later injection into this world finds - see `prior` above. `teardown` is declared at
+  // the end and hoisted; `connected` is only called once this file has run to the end.
+  const self = {
+    build: cfg.build, instance: cfg.instance, alive: () => connected(), teardown: () => teardown(),
+  };
+  window.__ccOverlay = self;
 
   /**
    * Everything this overlay hangs on the page outside its own host - the listeners on window and
@@ -2895,7 +2917,8 @@
   const onWorkerMessage = (msg, sender, respond) => {
     if (msg?.type !== 'cc-busy?') return false;
     if (sender?.id && sender.id !== chrome.runtime.id) return false;
-    respond({ busy: holdsWork() });
+    // The build and instance are how the worker tells its own overlay from one left over.
+    respond({ busy: holdsWork(), build: cfg.build, instance: cfg.instance });
     return false;
   };
   try { chrome.runtime.onMessage.addListener(onWorkerMessage); } catch {}
@@ -2927,9 +2950,8 @@
     host.remove();
     try { chrome.storage.onChanged.removeListener(onSettings); } catch {}
     try { chrome.runtime.onMessage.removeListener(onWorkerMessage); } catch {}
-    // A later injection into this world - only possible if something other than a reload took
-    // this one down - starts afresh rather than finding a flag for an overlay that is gone.
-    if (window.__ccOverlay === (cfg.build || true)) window.__ccOverlay = undefined;
+    // A later injection into this world starts afresh rather than finding an overlay that is gone.
+    if (window.__ccOverlay === self) window.__ccOverlay = undefined;
   }
   host.addEventListener('cc-overlay-replace', teardown, { signal: alive });
 
