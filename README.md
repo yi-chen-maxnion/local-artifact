@@ -318,8 +318,9 @@ any page in Chrome                 bridge daemon 127.0.0.1:4517        claude se
   process above the script; nothing can be routed without one.
 - **The screenshot is missing.** The notification's `shot` line and the panel's own screenshot line
   say why — most often the page was not the visible tab at the moment the anchor was picked, since
-  only the showing tab is ever captured, or the capture error Chrome gave. After reloading the
-  extension, refresh the page.
+  only the showing tab is ever captured, or the capture error Chrome gave. After the extension
+  reloads - by hand or by updating itself - open pages are rebound on their own; refresh only a page
+  that still carries the overlay from the old zip install.
 - **No button on a page.** The extension is not installed or not loaded; or the origin is turned
   off, which the toolbar badge says (`off`) and the menu undoes; or no session has run `/connect`
   yet, which the toolbar menu says.

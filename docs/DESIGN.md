@@ -112,10 +112,14 @@ enough to try.
   the extension either, and a comment arrives as something the user said. **There is no CORS
   anywhere on this server**, `/comment` included — see *When a comment does not arrive*.
 - **`x-cc-ext` is a sighting, never a grant.** Every request the worker makes carries the
-  extension's own id, and the daemon records that an extension exists — beside a
-  `chrome-extension://` Origin and nowhere else, because a page can send any header it likes by
-  accepting a preflight. No route consults it to decide whether a caller may do anything, and
-  none ever may.
+  extension's own id and version, and the daemon records that an extension exists — on any request
+  that passes the same test as the extension-only routes: a `chrome-extension://` Origin, or no
+  Origin and nothing marking a web context. The worker's GETs carry no Origin at all (see
+  *No extension* under *When a comment does not arrive*). A web page cannot get a sighting in: on
+  another origin it cannot put a custom header on a request here without a preflight this server
+  never grants, and a page the bridge serves is marked `Sec-Fetch-Site: same-origin`. Another
+  process on this machine can, and gains a timestamp in a status line. No route consults it to
+  decide whether a caller may do anything, and none ever may.
 - **The `__ccTest` seam is safe only because there is one world.** The overlay hands its internals
   to `window.__ccTest` for `test/overlay.test.mjs`; in the isolated world the `__ccTest` a page
   defines is a different object the overlay never sees. That is what lets `askExtension` — the one
@@ -546,8 +550,15 @@ does, no anchor is recorded and the pin is only its selector. The next time the 
 file it asks `/reanchor`. A unique match moves the pin: the selector is rebuilt from the node the
 chain names, and only if that node is actually in the DOM on screen. The pin then carries an
 anchor for the new version, and that version is kept too, so the edit after it is matched from
-there; the newest eight versions of a file are kept. An answer that the element is gone —
-deleted, or a tie between copies nothing tells apart — makes the pin lost for that load: not
+there; the newest eight versions of a file are kept. One case is held to a higher standard: when
+the edit grew the stretch around the target — more elements like it than before, so something was
+inserted among them — a newcomer placed where the commented element stood inherits its tag, its
+class and its slot, and that is enough for the tree alignment to pick it. There the winner has to
+lead the runner-up by at least 0.2 on what the element *says*: the overlap of its words (a Dice
+coefficient over lowercased word tokens) plus an id or testid both carry — never class or slot.
+No clear lead is no match. Where the counts are the same, the stretch is the same elements rewritten
+in place, and order stays the evidence. An answer that the element is gone —
+deleted, an insertion with no clear winner, or a tie between copies nothing tells apart — makes the pin lost for that load: not
 drawn, and listed as lost, because the old selector would point at whatever took its place. It
 keeps its anchor, and the next load asks again. No answer in time, or a chain the current DOM does
 not contain, leaves the pin on its selector. The match has a clock and a size limit, because it
@@ -758,8 +769,9 @@ start-up, so an orphaned page says *the extension was reloaded — refresh this 
 timing out silently. Since the extension started updating itself (see [Updates](#updates)) a
 reload no longer leaves that to the user: the new service worker's `onInstalled` walks every open
 http(s) tab and binds it again, the new overlay replaces the dead one's host, and an orphaned
-overlay takes itself down unless it is holding a comment still being written. The one exception is
-an overlay from 0.1.0, which predates all of this and stays until its page is refreshed.
+overlay takes itself down unless it is holding a comment still being written. Refreshing is only
+needed for a page that still carries an overlay from 0.1.0, which predates all of this and stays
+until its page is refreshed — once, when moving off the zip install.
 
 ## Why targets are served through the bridge
 
@@ -947,11 +959,19 @@ method this server does not handle.
 **No extension.** The other silent failure, and the one the daemon can see: every page carries
 its button because the extension puts it there, so with no extension installed a session can
 connect, open a file and receive nothing, with no sign on screen of what is missing. Every
-request the worker makes carries `x-cc-ext: <chrome.runtime.id>`, and the daemon records the
-sighting — but only beside a `chrome-extension://` Origin, since a page can send any header it
-likes through a preflight, and only as a timestamp, since nothing is ever granted on the strength
-of it. `/connect`, the bridge-status skill and `open.mjs` print the one line `lib/format.mjs` builds from it;
-`/connect` and `open.mjs` exit `3` when nothing has ever been seen.
+request the worker makes carries `x-cc-ext: <chrome.runtime.id>` and `x-cc-ext-version: <BUILD>`,
+and the daemon records the sighting — as a timestamp and a version, since nothing is ever granted
+on the strength of it. It used to count one only beside a `chrome-extension://` Origin, and that
+turned out to be almost never: measured in Chrome 154, the worker's GETs — `/resolve` on every page
+load, the `/health` hello at start-up — carry the two headers and `Sec-Fetch-Site: none` and **no
+Origin**; only its POSTs carry one. So a browser full of pages read as `last seen 4h ago`, and the
+version it runs stayed unknown through a whole self-update. A sighting is now any request with
+those headers that passes `extensionOnly` — a chrome-extension Origin, or no Origin and no web
+context — which is exactly what keeps pages out (see *Page scripts cannot speak for the user*).
+The id is the Origin's when there is one, the header's otherwise; a request that names a version
+and no id counts for the id last seen, since inventing one would read as a second copy loaded.
+`/connect`, the bridge-status skill and `open.mjs` print the one line `lib/format.mjs` builds from
+it; `/connect` and `open.mjs` exit `3` when nothing has ever been seen.
 
 **A stream that died without saying so.** Sleep the machine, drop the Wi-Fi or flip a VPN and the
 monitor's SSE socket is left half-open: nothing errors, nothing closes, and `reader.read()` waits
@@ -1141,7 +1161,28 @@ while it waits the toolbar badge says `UP`. A guard in `chrome.storage.local` (`
 at most two attempts per version, ten seconds apart, and each decision is logged as
 `[local-artifact] update: checked|skipped|deferred|gave up|reloading ...`. No polling and no alarms
 permission: the header rides on requests the extension makes anyway. The popup footer shows
-`v<BUILD>`. The extension sends its own version as `x-cc-ext-version`, which the daemon records per
+`v<BUILD>`.
+
+**After the reload every open tab gets a live overlay back, or the worker says why not.** Chrome
+does not re-inject a reloaded extension into pages already open, and the old overlay takes itself
+down within seconds, so a tab the new worker misses is left with nothing at all. The first version
+of the walk made one pass and gave up silently - and in Chrome for Testing it missed exactly when it
+mattered: the daemon that has just written a new version into the folder is often a new daemon,
+which knows no session until the session's monitor registers again, and until then `/resolve`
+answers `no session is set up`. So the walk goes in rounds, at 0, +1, +2, +3, +5 and +8 seconds
+(about twenty in all, inside the half minute an idle worker is given), forgetting the misses
+between rounds. A tab counts as done only when its overlay answers `cc-busy?` with this worker's
+`INSTANCE` - a per-lifetime id the worker puts into each overlay it injects - and every injection in
+the walk says `replace`. At the end it logs
+`overlays back on N of M open tab(s); not on <tab> <origin>: <why>`; a site turned off, or a page
+of the bridge's own, is never owed an overlay and is not counted. The overlay's guard is
+`window.__ccOverlay = { build, instance, alive, teardown }`, which only its own world can see: a
+second injection from the same worker leaves the running one alone (the worker injects on every
+completed load), and so does one not told to replace while the running one is alive; anything else
+is torn down and replaced - a prior told to go, a dead one, or one too old to say (0.1.0 set `true`
+there, not an object). `cc-busy?` answers `{ busy, build, instance }`. The guard is written for Chrome running the
+new injection in the old overlay's isolated world; in Chrome for Testing that was not observed -
+every re-injection got a fresh world, and the dead overlay's host was what had to go. The extension sends its own version as `x-cc-ext-version`, which the daemon records per
 extension id, so `/connect` can say `extension 0.2.0, plugin 0.2.1 - it updates itself`, and can
 spot the two cases that need a person: an extension that sends no version is a 0.1.0 zip copy, which
 has no update code and never will; and two ids heard in ten minutes are two copies loaded side by
@@ -1153,6 +1194,8 @@ unpacked MV3 extension sees new files on disk through `fetch(chrome.runtime.getU
 kept (`onInstalled` fires with reason `update`); pages already open keep the dead overlay and are
 not re-injected, which is why the worker binds them again itself; and more than thirty reloads
 under a second apart makes Chrome terminate the extension, which is what the attempt guard is for.
+Measured since: the worker's GET requests carry no Origin (the sighting rule above), and a freshly
+started daemon answers `/resolve` with no session until the monitor is back (the rounds above).
 What a browser restart does with a persisted Load unpacked whose folder changed underneath it is
 the one thing not yet measured in the real Chrome.
 
