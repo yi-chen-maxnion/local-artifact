@@ -19,7 +19,7 @@ import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detailLines } from '../lib/format.mjs';
 import { chainOf } from '../lib/reanchor.mjs';
-import { allElements, overlayWindow } from './dom.mjs';
+import { allElements, overlayWindow, waitFor } from './dom.mjs';
 
 const page = await overlayWindow();
 after(() => page.close());
@@ -902,6 +902,150 @@ describe('reanchor: a served HTML file', () => {
     try {
       await w.api.reanchorNow();
       assert.equal(saved(w)[0].selector, '#t');
+    } finally { await w.close(); }
+  });
+});
+
+/**
+ * The extension updates itself by reloading, and a reload does not take the old overlay off the
+ * pages that were open: its DOM stays, its script is cut off from the worker, and nothing is
+ * injected by Chrome. The worker injects again; these are what the new overlay and the old one do
+ * about each other. The old one here is either a bare host written into the page (an overlay from
+ * another world, which is all a different world looks like from this one) or this file itself.
+ */
+describe('updates: one overlay per page, and an old one leaves', () => {
+  const BUILD = '9.9.9';
+  const hosts = (w) => [...w.document.querySelectorAll('#cc-overlay-host')];
+  const withHost = (attrs) => `<!doctype html><html class="cc-pick"><body><div id="cc-overlay-host"${attrs}></div><p id="t">Text</p></body></html>`;
+
+  test('a host left by an overlay of another build is told to leave, and replaced', async () => {
+    let old = null;
+    let told = 0;
+    const w = await overlayWindow({
+      html: withHost(' data-build="0.0.9"'),
+      config: { build: BUILD },
+      keepHost: true,
+      before: (win) => {
+        old = win.document.getElementById('cc-overlay-host');
+        old.addEventListener('cc-overlay-replace', () => { told += 1; });
+      },
+    });
+    try {
+      assert.equal(told, 1, 'the old overlay was not asked to take itself down');
+      assert.equal(old.isConnected, false);
+      assert.equal(hosts(w).length, 1);
+      assert.equal(hosts(w)[0].dataset.build, BUILD);
+      // A page left mid-pick by the old overlay is not left under its crosshair.
+      assert.equal(w.document.documentElement.classList.contains('cc-pick'), false);
+    } finally { await w.close(); }
+  });
+
+  test('a host from 0.1.0, which has no data-build, is removed', async () => {
+    const w = await overlayWindow({ html: withHost(''), config: { build: BUILD }, keepHost: true });
+    try {
+      assert.equal(hosts(w).length, 1);
+      assert.equal(hosts(w)[0].dataset.build, BUILD);
+    } finally { await w.close(); }
+  });
+
+  test('a second injection into the same world leaves the first overlay be', async () => {
+    const w = await overlayWindow({ config: { build: BUILD }, keepHost: true });
+    try {
+      const first = hosts(w)[0];
+      assert.ok(first);
+      let told = 0;
+      first.addEventListener('cc-overlay-replace', () => { told += 1; });
+      w.inject();
+      assert.equal(told, 0);
+      assert.deepEqual(hosts(w), [first]);
+      assert.equal((await w.tell({ type: 'cc-busy?' }))?.busy, false, 'the first overlay stopped answering');
+      assert.equal(w.chrome.runtime.onMessage.listeners.length, 1);
+    } finally { await w.close(); }
+  });
+
+  /** Everything the overlay put on the page outside its host is gone, and nothing answers. */
+  function assertGone(w) {
+    assert.equal(hosts(w).length, 0, 'the host is still on the page');
+    assert.ok(w.listeners.length > 30, `only ${w.listeners.length} listeners were recorded`);
+    const left = w.listeners.filter((l) => !l.options?.signal?.aborted);
+    assert.deepEqual(left.map((l) => `${l.where}:${l.type}`), [], 'listeners left on the page');
+    assert.deepEqual(w.chrome.runtime.onMessage.listeners, []);
+    assert.deepEqual(w.chrome.storage.onChanged.listeners, []);
+    assert.ok(!w.window.__ccOverlay, 'this world still claims an overlay');
+    assert.equal(w.document.querySelectorAll('style').length, 0, 'its cursor stylesheet is still in the page');
+  }
+
+  test('cc-overlay-replace takes the overlay down completely, and leaves the pins', async () => {
+    const pin = JSON.stringify([{ kind: 'element', selector: '#t', n: 1, comment: 'x', page: '/page?q=1', ts: 1 }]);
+    const w = await overlayWindow({ config: { build: BUILD }, keepHost: true, storage: { 'cc-pins-abcdef1234': pin } });
+    try {
+      assert.equal(w.chrome.runtime.onMessage.listeners.length, 1);
+      assert.equal(w.document.querySelectorAll('style').length, 1);
+      hosts(w)[0].dispatchEvent(new w.window.CustomEvent('cc-overlay-replace'));
+      assertGone(w);
+      // Pins are the user's, and the overlay that replaces this one reads them.
+      assert.equal(w.window.localStorage.getItem('cc-pins-abcdef1234'), pin);
+    } finally { await w.close(); }
+  });
+
+  test('an overlay whose extension is gone takes itself down when looked at again', async () => {
+    const w = await overlayWindow({ config: { build: BUILD }, keepHost: true });
+    try {
+      w.chrome.runtime.id = '';
+      w.document.dispatchEvent(new w.window.Event('visibilitychange'));
+      assertGone(w);
+    } finally { await w.close(); }
+  });
+
+  test('and when it next tries to reach the extension', async () => {
+    const w = await overlayWindow({ config: { build: BUILD }, keepHost: true });
+    try {
+      w.chrome.runtime.id = '';
+      assert.match((await w.api.askExtension('status', {}, 500)).error, /the extension was reloaded/);
+      await waitFor(() => hosts(w).length === 0, 'the orphaned overlay stayed on the page');
+      assertGone(w);
+    } finally { await w.close(); }
+  });
+
+  /** A panel open on the page's paragraph, with `text` typed into it. */
+  function write(w, text) {
+    w.api.compose(w.document.getElementById('t'));
+    w.shadow.querySelector('textarea').value = text;
+  }
+  const busyWindow = () => overlayWindow({
+    html: '<!doctype html><html><body><p id="t">Text</p></body></html>',
+    config: { build: BUILD },
+    keepHost: true,
+    // The screenshot taken as the panel opens: the worker says no, and the panel opens anyway.
+    sendMessage: (msg, respond) => respond({ error: 'no screenshot here' }),
+  });
+
+  test('but not from under a comment being written: that waits for the panel to close', async () => {
+    const w = await busyWindow();
+    try {
+      write(w, 'half a thought');
+      w.chrome.runtime.id = '';
+      w.document.dispatchEvent(new w.window.Event('visibilitychange'));
+      assert.equal(hosts(w).length, 1, 'the typed comment was taken off the page with the overlay');
+      w.shadow.querySelector('textarea').value = '';
+      w.document.dispatchEvent(new w.window.Event('visibilitychange'));
+      assertGone(w);
+    } finally { await w.close(); }
+  });
+
+  test('cc-busy? is yes with unsent text in the panel, and no otherwise', async () => {
+    const w = await busyWindow();
+    try {
+      const busy = async () => (await w.tell({ type: 'cc-busy?' }))?.busy;
+      assert.equal(await busy(), false, 'no panel open');
+      write(w, '');
+      assert.equal(await busy(), false, 'an empty panel');
+      w.shadow.querySelector('textarea').value = '   ';
+      assert.equal(await busy(), false, 'only whitespace');
+      w.shadow.querySelector('textarea').value = 'move this left';
+      assert.equal(await busy(), true, 'a comment being written');
+      // Not every message is this one: anything else is not answered here.
+      assert.equal(await w.tell({ type: 'something-else' }), undefined);
     } finally { await w.close(); }
   });
 });

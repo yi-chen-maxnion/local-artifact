@@ -51,6 +51,14 @@ const SOURCE = fs.readFileSync(OVERLAY_SRC, 'utf8');
  * answers it, and not calling `respond` is a worker that never answers. Every ask is recorded in
  * `requests` either way, so a test can also assert on what was asked while nothing answers. The
  * fake is returned as `chrome`, so a test can also take the extension away mid-flight.
+ *
+ * The other direction is `tell(msg)`: a message from the worker to this tab, answered by whatever
+ * listener the overlay registered on `chrome.runtime.onMessage`, or by nobody.
+ *
+ * For the tests about one overlay replacing another: `keepHost` leaves the overlay's host in the
+ * document, `before(window)` runs after the page has loaded and before the overlay is injected,
+ * `inject()` injects the file again into the same window - which is the same world - and
+ * `listeners` records every listener the overlay put on window and document while it started.
  */
 export async function overlayWindow({
   url = 'http://localhost:5173/page?q=1#/route',
@@ -58,6 +66,8 @@ export async function overlayWindow({
   config = null,
   storage = null,
   html = '<!doctype html><html><body></body></html>',
+  keepHost = false,
+  before = null,
 } = {}) {
   const dom = new JSDOM(html, {
     url,
@@ -71,6 +81,15 @@ export async function overlayWindow({
   window.__ccTest = (exposed) => { api = exposed; };
 
   const requests = [];
+  /** A `chrome.*` event, its listeners in view so a test can fire it and see who still listens. */
+  const event = () => {
+    const listeners = [];
+    return {
+      listeners,
+      addListener: (f) => { listeners.push(f); },
+      removeListener: (f) => { const i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); },
+    };
+  };
   /**
    * The extension, as much of it as the overlay touches. `lastError` is writable because that is
    * how Chrome reports a failed `sendMessage`: the callback runs with no answer and the error
@@ -84,10 +103,11 @@ export async function overlayWindow({
         requests.push(msg);
         sendMessage?.(msg, respond);
       },
+      onMessage: event(),
     },
     storage: {
       local: { get: async () => ({}), set: async () => {} },
-      onChanged: { addListener() {} },
+      onChanged: event(),
     },
   };
   window.chrome = chrome;
@@ -118,13 +138,38 @@ export async function overlayWindow({
 
   // What `chrome.scripting.executeScript` does, in the one way jsdom can do it: the file is run
   // in this window, with the config and the extension already there.
-  try {
+  const inject = () => {
     const script = window.document.createElement('script');
     script.textContent = SOURCE;
     window.document.body.appendChild(script);
     script.remove();
+  };
+
+  /**
+   * Every listener the overlay hangs outside its own host, as it starts: these are what it has to
+   * take down again when it leaves. Recorded on the two objects' own methods for the length of
+   * the injection only, and handed on untouched. jsdom's selector engine registers listeners of
+   * its own on the window the first time a selector is matched; those are jsdom's, not the
+   * overlay's, and are told apart by where the call came from.
+   */
+  const listeners = [];
+  const record = (target, where) => {
+    const add = target.addEventListener;
+    target.addEventListener = function recorded(type, fn, options) {
+      const caller = new Error().stack.split('\n')[2] || '';
+      if (!/[/\\]node_modules[/\\]/.test(caller)) listeners.push({ where, type, options });
+      return add.call(this, type, fn, options);
+    };
+    return () => { delete target.addEventListener; };
+  };
+
+  await before?.(window);
+  const unrecord = [record(window, 'window'), record(window.document, 'document')];
+  try {
+    inject();
   } finally {
     window.Element.prototype.attachShadow = attachShadow;
+    for (const f of unrecord) f();
   }
 
   if (!api) throw new Error('overlay.js did not reach its __ccTest seam - it stopped early');
@@ -132,7 +177,7 @@ export async function overlayWindow({
   // The overlay's own host is a <div> child of <body>. Left there it would be counted as a
   // sibling by :nth-of-type and swept up by "every element in the document", so the fixtures
   // get the document to themselves. Nothing the seam exposes reads `host`.
-  window.document.getElementById('cc-overlay-host')?.remove();
+  if (!keepHost) window.document.getElementById('cc-overlay-host')?.remove();
 
   return {
     window,
@@ -142,6 +187,15 @@ export async function overlayWindow({
     shadow,
     chrome,
     requests,
+    listeners,
+    inject,
+    /** A message from the worker to this tab; resolves to the answer, or undefined for none. */
+    tell: (msg) => new Promise((resolve) => {
+      const keep = chrome.runtime.onMessage.listeners
+        .map((f) => f(msg, { id: chrome.runtime.id }, resolve))
+        .some(Boolean);
+      if (!keep) resolve(undefined);
+    }),
     /** Replaces the whole page. Returns the document for convenience. */
     setBody(html) {
       window.document.body.innerHTML = html;

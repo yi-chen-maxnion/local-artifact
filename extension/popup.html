@@ -41,6 +41,9 @@
   .btn:disabled { opacity:.5; cursor:default; }
   /* The account this browser posts as. Mono, because it is a name and a workspace, not prose. */
   .who { font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; color:#9b9ba6; }
+  /* For support: which version is running, said quietly at the foot of the menu. */
+  .ver { padding:6px 14px 8px; border-top:1px solid #ffffff14; color:#6b6b76;
+    font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
 </style>
 </head>
 <body>
@@ -65,6 +68,7 @@
     <span class="label">Slack<small id="slack-note" class="who" hidden></small></span>
     <button class="btn" id="slack-btn" hidden></button>
   </div>
+  <div class="ver" id="ver"></div>
   <script src="popup.js"></script>
 </body>
 </html>

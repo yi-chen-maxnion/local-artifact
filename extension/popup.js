@@ -114,8 +114,23 @@ async function main() {
     };
   }
 
+  /**
+   * The running version, from the worker: after a browser restart the manifest can already say the
+   * new one while the worker still runs the old code, and the worker is what anybody debugging
+   * needs to know about. The manifest is the fallback for a worker that did not answer.
+   */
+  async function paintVersion() {
+    const v = await ask('version');
+    let build = v?.build;
+    if (!build) try { build = chrome.runtime.getManifest().version; } catch {}
+    $('ver').textContent = v?.ready
+      ? `v${build || '?'} - ${v.ready} 已就緒，送出留言後自動更新`
+      : `v${build || '?'}`;
+  }
+
   paintSession();
   paintSlack();
+  paintVersion();
 }
 
 main();

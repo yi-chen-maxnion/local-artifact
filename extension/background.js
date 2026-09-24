@@ -16,6 +16,18 @@
 // holds the two copies together.
 const BRIDGE = 'http://127.0.0.1:4517';
 
+// The version of the files this worker was started from. A constant rather than getManifest(),
+// because after a browser restart Chrome can report the new manifest while this worker still runs
+// the old script. scripts/ rewrites this line on release; test/ checks it against manifest.json.
+const BUILD = '0.1.0';
+
+/** Self-update state; see `maybeUpdate` below. Up here because `call` reads it on every request. */
+let inFlight = 0; // requests to the bridge of this worker's own that have not come back
+let updateWhenIdle = false; // an update waited for the last of them
+let updating = null; // the one update check that may run at a time
+let updateReady = null; // the version waiting on a comment being written, for the badge and the menu
+let updateRetry = null;
+
 /**
  * Which session each tab is talking to. Kept in memory rather than in the URL or in the page,
  * so a SPA that rewrites its own address bar cannot break the binding. Rebuilt from the bridge
@@ -105,7 +117,9 @@ async function ensureBound(tabId, url) {
       chrome.scripting.executeScript({
         target,
         func: (cfg) => { window.__ccConfig = cfg; },
-        args: [{ previewId: binding.previewId, origin: BRIDGE, repo: binding.repo, slack: binding.slack }],
+        args: [{
+          previewId: binding.previewId, origin: BRIDGE, repo: binding.repo, slack: binding.slack, build: BUILD,
+        }],
       }),
       chrome.scripting.executeScript({ target, world: 'MAIN', files: ['console-hook.js'] }),
     ]);
@@ -153,19 +167,24 @@ async function paintBadge(tabId, origin) {
   await ready;
   const off = disabled.has(origin);
   const b = bound.get(tabId);
+  // An update waiting on a comment is said on every tab, since the comment may be in any of them;
+  // 'off' still wins on its own origin, where it is what the icon has to say first.
+  const up = !off && Boolean(updateReady);
   try {
     // Independent of each other, and this runs on every navigation and every tab switch.
     await Promise.all([
-      chrome.action.setBadgeText({ tabId, text: off ? 'off' : '' }),
-      // The colour is a constant and there is no badge to colour unless it says 'off'.
-      ...(off ? [chrome.action.setBadgeBackgroundColor({ tabId, color: '#6b6b76' })] : []),
+      chrome.action.setBadgeText({ tabId, text: off ? 'off' : up ? 'UP' : '' }),
+      // The colours are constants and there is no badge to colour unless it says something.
+      ...(off || up ? [chrome.action.setBadgeBackgroundColor({ tabId, color: off ? '#6b6b76' : '#6366f1' })] : []),
       chrome.action.setTitle({
         tabId,
         title: off
           ? `Comments off for ${origin}`
-          : b
-            ? `Commenting into ${b.repo || 'the set-up session'}`
-            : 'No Claude session is set up - run /connect in one',
+          : up
+            ? `Update ${updateReady} ready - finish your comment and it installs itself`
+            : b
+              ? `Commenting into ${b.repo || 'the set-up session'}`
+              : 'No Claude session is set up - run /connect in one',
       }),
     ]);
   } catch {}
@@ -196,32 +215,48 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
  * channel is archived" into "bridge 502".
  */
 async function call(route, { body, method, timeout = 25000 } = {}) {
-  let r;
+  // Counted so an update never reloads this worker out from under a comment on its way.
+  inFlight += 1;
   try {
-    r = await fetch(`${BRIDGE}${route}`, {
-      method: method || (body === undefined ? 'GET' : 'POST'),
-      headers: {
-        'x-cc-ext': chrome.runtime.id,
-        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(timeout),
-    });
-  } catch (e) {
-    /**
-     * `code` is the part that crosses the process boundary intact. The sentence beside it is for
-     * a person to read and may be reworded at any time; the popup and the panel decide what to
-     * offer from the code alone, so that rewording one of these cannot silently change a menu.
-     */
-    return e?.name === 'TimeoutError'
-      ? { error: 'the bridge did not answer in time', code: 'bridge_timeout' }
-      : { error: 'the bridge is not answering - run /connect again in the session', code: 'bridge_unreachable' };
+    let r;
+    try {
+      r = await fetch(`${BRIDGE}${route}`, {
+        method: method || (body === undefined ? 'GET' : 'POST'),
+        headers: {
+          'x-cc-ext': chrome.runtime.id,
+          // Which version of this extension is running, so /connect can say whether it is current.
+          'x-cc-ext-version': BUILD,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(timeout),
+      });
+    } catch (e) {
+      /**
+       * `code` is the part that crosses the process boundary intact. The sentence beside it is for
+       * a person to read and may be reworded at any time; the popup and the panel decide what to
+       * offer from the code alone, so that rewording one of these cannot silently change a menu.
+       */
+      return e?.name === 'TimeoutError'
+        ? { error: 'the bridge did not answer in time', code: 'bridge_timeout' }
+        : { error: 'the bridge is not answering - run /connect again in the session', code: 'bridge_unreachable' };
+    }
+    // The version sitting in the folder this extension is loaded from, as the bridge last wrote it.
+    // Every response carries it, so a new version is noticed on the next page load.
+    const latest = r.headers?.get?.('x-cc-ext-latest');
+    if (latest && newer(latest, BUILD)) maybeUpdate(`the bridge has ${latest}`);
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) return j;
+    // The bridge's own code where it sent one - a Slack failure says which - and its status, which
+    // is how a daemon from older code is told apart: it answers a route it does not have with 404.
+    return { error: j.error || `bridge ${r.status}`, code: j.code || 'bridge_error', status: r.status };
+  } finally {
+    inFlight -= 1;
+    if (!inFlight && updateWhenIdle) {
+      updateWhenIdle = false;
+      maybeUpdate('the last bridge request finished');
+    }
   }
-  const j = await r.json().catch(() => ({}));
-  if (r.ok) return j;
-  // The bridge's own code where it sent one - a Slack failure says which - and its status, which
-  // is how a daemon from older code is told apart: it answers a route it does not have with 404.
-  return { error: j.error || `bridge ${r.status}`, code: j.code || 'bridge_error', status: r.status };
 }
 
 /**
@@ -234,6 +269,25 @@ async function call(route, { body, method, timeout = 25000 } = {}) {
 const sayHello = () => call('/health', { timeout: 4000 });
 chrome.runtime.onStartup.addListener(sayHello);
 chrome.runtime.onInstalled.addListener(sayHello);
+
+/**
+ * Pages that were open when this extension was installed or reloaded - by an update, most of the
+ * time - get an overlay now rather than on their next load. A reload leaves each one holding the
+ * old overlay's DOM with its script cut off from this worker, and injects nothing by itself; the
+ * new overlay takes the old one's place (see the top of overlay.js). `bound` is empty after a
+ * reload, so every http(s) tab is asked about, one at a time, so that a window full of tabs on one
+ * origin asks the bridge once and the rest are answered from the cache.
+ */
+chrome.runtime.onInstalled.addListener(async (details) => {
+  const reason = details?.reason;
+  if (reason !== 'install' && reason !== 'update') return;
+  if (reason === 'update') say(`now running ${BUILD} (was ${details.previousVersion || 'unknown'})`);
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({}); } catch {}
+  for (const t of tabs) {
+    if (t.id && originOf(t.url || '')) await ensureBound(t.id, t.url);
+  }
+});
 
 async function sendComment(payload) {
   if (!payload.previewId) return { error: 'this page is not bound to a session - reload it' };
@@ -314,6 +368,180 @@ async function captureTab(tab) {
   return dataUrl ? { dataUrl } : { error: 'captureVisibleTab returned nothing' };
 }
 
+// ---------------------------------------------------------------- updating itself
+/**
+ * The extension is loaded unpacked, once, from a folder the bridge daemon overwrites with each new
+ * version of the plugin. Chrome does not notice new files there, so the worker reloads itself.
+ *
+ * What is running is `BUILD`, never `getManifest()`: after a browser restart Chrome has been seen
+ * to report the new manifest while this worker still runs the old script. What is on disk is read
+ * with a fetch of the extension's own files, which does see new files.
+ *
+ * A reload is a blunt instrument, so it is guarded on every side. The folder is read twice, five
+ * seconds apart, and the manifest and this file must both carry the new version - the daemon
+ * swaps the folder in a few renames, and a reload in between would load half of one version and
+ * half of another, or nothing. No request of this worker's may be in flight: a comment on its way
+ * would be cut off. No tab may hold a comment being written: the reload leaves its panel on screen
+ * with nothing behind it. And a version gets two reloads, ten seconds apart at least, and then no
+ * more: Chrome terminates an extension that reloads itself in a tight loop, and a folder that says
+ * one version while Chrome keeps loading another would be exactly that loop.
+ *
+ * Checked when the worker starts - a new worker is often the first thing after the folder changed
+ * - and whenever the bridge says the folder holds a newer version. No alarms: a worker with no
+ * bridge traffic has nobody to update for.
+ */
+const UPDATE_SETTLE_MS = 5000;
+const UPDATE_SPACING_MS = 10000;
+const UPDATE_RETRY_MS = 15000;
+const UPDATE_ATTEMPTS = 2;
+
+/** One line per decision, so the update can be followed in the worker's console. */
+const say = (line) => console.info(`[local-artifact] update: ${line}`);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** `a` is a strictly later version than `b`. Anything unreadable counts as 0.0.0. */
+function newer(a, b) {
+  const parts = (v) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v || '').trim());
+    return m ? m.slice(1).map(Number) : [0, 0, 0];
+  };
+  const x = parts(a);
+  const y = parts(b);
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+}
+
+/** The version in the folder's manifest, or '' when it cannot be read - mid-sync, say. */
+async function folderManifest() {
+  try {
+    const r = await fetch(chrome.runtime.getURL('manifest.json'), { cache: 'no-store' });
+    return String((await r.json())?.version || '');
+  } catch { return ''; }
+}
+
+/** The BUILD line of the background.js in the folder, or ''. */
+async function folderWorker() {
+  try {
+    const r = await fetch(chrome.runtime.getURL('background.js'), { cache: 'no-store' });
+    return /^const BUILD = '([^']*)';$/m.exec(await r.text())?.[1] || '';
+  } catch { return ''; }
+}
+
+/**
+ * The http(s) tabs whose overlay says it holds a comment being written or sent. A tab with no
+ * overlay, or with one too old or too dead to answer, has nothing to lose and is not waited for.
+ */
+async function busyTabs() {
+  let tabs = [];
+  try { tabs = (await chrome.tabs.query({})).filter((t) => t.id && originOf(t.url || '')); } catch {}
+  const answers = await Promise.all(tabs.map((t) => Promise.race([
+    Promise.resolve()
+      .then(() => chrome.tabs.sendMessage(t.id, { type: 'cc-busy?' }, { frameId: 0 }))
+      .catch(() => null),
+    sleep(1500).then(() => null),
+  ])));
+  return tabs.filter((_, i) => answers[i]?.busy === true);
+}
+
+/** The toolbar icon says an update is waiting on a comment - on every tab, and globally. */
+async function showUpdateReady(target) {
+  if (updateReady === target) return;
+  updateReady = target;
+  try {
+    await chrome.action.setBadgeText({ text: target ? 'UP' : '' });
+    if (target) await chrome.action.setBadgeBackgroundColor({ color: '#6366f1' });
+  } catch {}
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({}); } catch {}
+  for (const t of tabs) {
+    const origin = originOf(t.url || '');
+    if (t.id && origin) paintBadge(t.id, origin);
+  }
+}
+
+/** Looks again later, so an update waiting on a comment does not wait for bridge traffic too. */
+function retryUpdate() {
+  if (updateRetry) return;
+  updateRetry = setTimeout(() => { updateRetry = null; maybeUpdate('retrying'); }, UPDATE_RETRY_MS);
+}
+
+function maybeUpdate(why) {
+  updating ||= checkForUpdate(why)
+    .catch((e) => say(`check failed: ${e?.message || e}`))
+    .finally(() => { updating = null; });
+  return updating;
+}
+
+/** The loop guard's record: which version was last reloaded for, how often, and when. */
+async function lastReload() {
+  try { return (await chrome.storage.local.get('selfUpdate'))?.selfUpdate || null; } catch { return null; }
+}
+const attemptsFor = (last, target) => (last?.target === target ? Number(last.attempts) || 0 : 0);
+
+async function checkForUpdate(why) {
+  const first = await folderManifest();
+  if (!newer(first, BUILD)) {
+    say(`checked (${why}): running ${BUILD}, folder has ${first || 'no readable manifest'}`);
+    await showUpdateReady(null);
+    return;
+  }
+  // Every bridge response asks again while the folder is ahead; a version already given up on
+  // is answered at once rather than after the wait below.
+  const tried = attemptsFor(await lastReload(), first);
+  if (tried >= UPDATE_ATTEMPTS) {
+    await showUpdateReady(null);
+    say(`gave up: ${tried} reloads did not bring up ${first}; running ${BUILD} - reload the extension by hand`);
+    return;
+  }
+  await sleep(UPDATE_SETTLE_MS);
+  const [manifest, worker] = await Promise.all([folderManifest(), folderWorker()]);
+  if (manifest !== worker || !newer(manifest, BUILD)) {
+    say(`skipped (${why}): folder is mid-sync - manifest ${manifest || '?'}, background.js ${worker || '?'}; running ${BUILD}`);
+    return;
+  }
+  const target = manifest;
+  if (inFlight) {
+    updateWhenIdle = true;
+    say(`deferred: ${inFlight} bridge request(s) in flight; ${BUILD} -> ${target}`);
+    return;
+  }
+  const busy = await busyTabs();
+  if (busy.length) {
+    await showUpdateReady(target);
+    retryUpdate();
+    say(`deferred: a comment is being written in ${busy.length} tab(s); ${BUILD} -> ${target}`);
+    return;
+  }
+  const last = await lastReload();
+  const now = Date.now();
+  const attempts = attemptsFor(last, target);
+  if (attempts >= UPDATE_ATTEMPTS) {
+    await showUpdateReady(null);
+    say(`gave up: ${attempts} reloads did not bring up ${target}; running ${BUILD} - reload the extension by hand`);
+    return;
+  }
+  if (attempts && now - (Number(last.lastAt) || 0) < UPDATE_SPACING_MS) {
+    retryUpdate();
+    say(`deferred: the last reload for ${target} was under ${UPDATE_SPACING_MS / 1000} s ago; running ${BUILD}`);
+    return;
+  }
+  // Asked again: the tabs took their time answering, and a comment may have left meanwhile.
+  if (inFlight) {
+    updateWhenIdle = true;
+    say(`deferred: ${inFlight} bridge request(s) in flight; ${BUILD} -> ${target}`);
+    return;
+  }
+  try {
+    await chrome.storage.local.set({ selfUpdate: { target, attempts: attempts + 1, lastAt: now } });
+  } catch {}
+  say(`reloading: ${BUILD} -> ${target} (attempt ${attempts + 1} of ${UPDATE_ATTEMPTS})`);
+  chrome.runtime.reload();
+}
+
+/** For the toolbar menu, which shows the version for anyone asked to report a problem. */
+const version = async () => ({ build: BUILD, ready: updateReady });
+
 chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return false;
 
@@ -336,7 +564,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   }
 
   const ask = {
-    slackDestinations, slackShare, slackStatus, slackLogin, slackLogout, status, reanchor,
+    slackDestinations, slackShare, slackStatus, slackLogin, slackLogout, status, reanchor, version,
   }[msg?.type];
   if (ask) {
     ask(msg.payload)
@@ -347,3 +575,6 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
 
   return false;
 });
+
+// A worker that has just started is often the first thing to run after the folder changed.
+maybeUpdate('worker started');

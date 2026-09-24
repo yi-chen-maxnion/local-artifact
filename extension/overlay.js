@@ -7,15 +7,18 @@
  * comment through it.
  */
 (() => {
-  // The global guards against a second injection into the same world; the host element against
-  // an overlay left behind by an earlier injection that has not been cleaned up.
-  if (window.__ccOverlay || document.getElementById('cc-overlay-host')) return;
-  window.__ccOverlay = true;
+  // A second injection into the same world - the worker injects on every completed load - finds
+  // the first one still running and stops. Only this world's own global can say that: the host
+  // element is in the page's DOM, where the page can write any attribute it likes, and where an
+  // overlay from an extension that has since been reloaded leaves a host behind for good.
+  if (window.__ccOverlay) return;
 
   /** Written into this world by the service worker, immediately before this file is injected. */
   const cfg = (() => {
     const w = window.__ccConfig || {};
     return {
+      /** The worker's own version, written on the host for whoever inspects the page. */
+      build: typeof w.build === 'string' ? w.build : '',
       previewId: w.previewId || null,
       origin: w.origin || null,
       // Which session this page is talking to. It used to be implicit - you had just named this
@@ -28,6 +31,31 @@
   })();
   // Without either one there is no session to speak for and no bridge to reach, so draw nothing.
   if (!cfg.previewId || !cfg.origin) return;
+
+  /**
+   * A host already on the page is not this world's, or the check above would have stopped here:
+   * it is what an overlay from before the extension reloaded left behind - reloading gives this
+   * file a fresh world and leaves the old DOM where it was, its script cut off from the worker.
+   * Left in place it would block this overlay for the life of the page, so it is asked to take
+   * itself down (its listeners are in its own world, where only it can remove them) and removed.
+   * One from 0.1.0 does not listen for that and is simply removed. Its classes on <html> go too:
+   * one taken down mid-pick would otherwise leave the page under a crosshair with its frames dead.
+   */
+  const stale = document.getElementById('cc-overlay-host');
+  if (stale) {
+    stale.dispatchEvent(new CustomEvent('cc-overlay-replace'));
+    stale.remove();
+    document.documentElement.classList.remove('cc-pick', 'cc-pick-text');
+  }
+  window.__ccOverlay = cfg.build || true;
+
+  /**
+   * Everything this overlay hangs on the page outside its own host - the listeners on window and
+   * document - carries this signal, so taking the overlay down is one abort rather than a list
+   * of removals that drifts from the list of additions. See `teardown` at the end.
+   */
+  const life = new AbortController();
+  const alive = life.signal;
 
   const MAX_HTML = 600;
   const DRAG_THRESHOLD = 6;
@@ -68,7 +96,12 @@
         error: 'the extension did not answer - refresh this page', code: 'extension_timeout',
       }), timeout);
       // Reloading the extension orphans this script: it keeps running, its line to the worker gone.
-      if (!connected()) return finish({ error: 'the extension was reloaded - refresh this page' });
+      // The overlay takes itself down once it finds that out - after this ask has had its answer,
+      // and not while that would take a comment being written with it; see `checkAlive`.
+      if (!connected()) {
+        setTimeout(() => checkAlive(), 0);
+        return finish({ error: 'the extension was reloaded - refresh this page' });
+      }
       try {
         chrome.runtime.sendMessage({ type, payload }, (res) => {
           const err = chrome.runtime.lastError;
@@ -412,7 +445,7 @@
     if (typeof e.detail !== 'string') return;
     consoleErrors.push(e.detail);
     while (consoleErrors.length > 5) consoleErrors.shift();
-  });
+  }, { signal: alive });
 
   // ---------------------------------------------------------------- UI
   const ACCENT = '#6366f1'; // the tool itself: button, popover, cursors
@@ -458,6 +491,9 @@
   const DWELL_MS = 35;
   const host = document.createElement('div');
   host.id = 'cc-overlay-host';
+  // Read by nothing in this file: it is for a person looking at the page in devtools, who can then
+  // tell which version drew this overlay - and, after an update, that the old one is gone.
+  if (cfg.build) host.dataset.build = cfg.build;
   host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;';
   // Closed, so a script on the page cannot reach into the panel through `host.shadowRoot` - fill
   // in the textarea, click Send - and have that leave as the user's comment.
@@ -1475,10 +1511,10 @@
   // ones libraries put on `document` before we loaded. These sit on the same node as the
   // freeze below and are unaffected by it - stopPropagation stops the event moving to the next
   // node, never the other listeners already attached to this one.
-  window.addEventListener('contextmenu', onContextMenu, true);
-  window.addEventListener('mousemove', onMove, true);
-  window.addEventListener('mousedown', onDown, true);
-  window.addEventListener('mouseup', onUp, true);
+  window.addEventListener('contextmenu', onContextMenu, { capture: true, signal: alive });
+  window.addEventListener('mousemove', onMove, { capture: true, signal: alive });
+  window.addEventListener('mousedown', onDown, { capture: true, signal: alive });
+  window.addEventListener('mouseup', onUp, { capture: true, signal: alive });
 
   /**
    * In comment mode the page is frozen: it is a thing being looked at, not something being
@@ -1534,7 +1570,7 @@
       if (!inCommentMode()) return;
       e.stopPropagation();
       if (FREEZE_DEFAULT.has(type)) e.preventDefault();
-    }, true);
+    }, { capture: true, signal: alive });
   }
 
   // ------------------------------------------------- text selection -> quote anchor
@@ -2287,7 +2323,7 @@
   // A handle is not a button: a click that happened to start on it must not reach anything else.
   el.grip.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
   // The capture hides the whole overlay; make sure a failure mid-flight cannot leave it hidden.
-  addEventListener('pagehide', () => { host.style.visibility = ''; host.style.opacity = ''; host.classList.remove('cc-capturing'); });
+  addEventListener('pagehide', () => { host.style.visibility = ''; host.style.opacity = ''; host.classList.remove('cc-capturing'); }, { signal: alive });
 
   /**
    * Entering pick mode with text already selected anchors that selection straight away.
@@ -2355,7 +2391,7 @@
     e.stopPropagation();
     e.preventDefault();
     togglePick();
-  }, true);
+  }, { capture: true, signal: alive });
 
   // ------------------------------------------------- pins
   /**
@@ -2809,8 +2845,8 @@
   // Capture, so scrolling INSIDE a container is caught too. Scroll events do not bubble, so a
   // plain listener here only ever heard the window move - which in an app that scrolls a panel
   // rather than the document is exactly the thing that never happens.
-  addEventListener('scroll', onViewportChange, { capture: true, passive: true });
-  addEventListener('resize', onViewportChange, { passive: true });
+  addEventListener('scroll', onViewportChange, { capture: true, passive: true, signal: alive });
+  addEventListener('resize', onViewportChange, { passive: true, signal: alive });
 
   // ------------------------------------------------- the toolbar menu's settings
   /**
@@ -2842,10 +2878,73 @@
   const readSettings = () => chrome.storage.local.get(['off', 'idlePins']).then((v) => applySettings({
     off: (v?.off || []).includes(location.origin), idlePins: v?.idlePins === true,
   }), () => {});
+  const onSettings = (c, area) => { if (area === 'local' && (c.off || c.idlePins)) readSettings(); };
   try {
     readSettings();
-    chrome.storage.onChanged.addListener((c, area) => { if (area === 'local' && (c.off || c.idlePins)) readSettings(); });
+    chrome.storage.onChanged.addListener(onSettings);
   } catch {}
+
+  // ------------------------------------------------- updates, and leaving
+  /**
+   * Whether this tab holds work an extension reload would throw away: a comment typed and not yet
+   * sent, or one on its way. The worker asks every tab before it reloads itself for an update and
+   * waits while any says yes - the reload leaves this panel on screen with nothing behind it.
+   */
+  const holdsWork = () => state.busy || (composing() && el.ta.value.trim() !== '');
+
+  const onWorkerMessage = (msg, sender, respond) => {
+    if (msg?.type !== 'cc-busy?') return false;
+    if (sender?.id && sender.id !== chrome.runtime.id) return false;
+    respond({ busy: holdsWork() });
+    return false;
+  };
+  try { chrome.runtime.onMessage.addListener(onWorkerMessage); } catch {}
+
+  /**
+   * Takes this overlay off the page completely: its host, its stylesheet and classes on <html>,
+   * every listener it put on window and document, its observer and its timers. The pins stay in
+   * localStorage, where the overlay that replaces this one reads them.
+   *
+   * Two things call it. The overlay injected after an extension reload, which finds this host and
+   * dispatches `cc-overlay-replace` on it - this world's listeners can only be removed from this
+   * world. And this overlay itself, on finding its extension gone with nothing injected after it
+   * (the extension turned off, or reloaded while this origin has no session): its 36 capture
+   * listeners would otherwise stay on the page for the life of the tab, and a `c` would still put
+   * an invisible overlay into comment mode and freeze the page under it.
+   */
+  let gone = false;
+  function teardown() {
+    if (gone) return;
+    gone = true;
+    life.abort();
+    clearInterval(pulse);
+    domWatch?.disconnect();
+    domWatch = null;
+    for (const t of [repaintTimer, leaveTimer, disarmTimer, destTimer, state.dwell]) clearTimeout(t);
+    if (frame) cancelAnimationFrame(frame);
+    root.classList.remove('cc-pick', 'cc-pick-text');
+    cursorSheet.remove();
+    host.remove();
+    try { chrome.storage.onChanged.removeListener(onSettings); } catch {}
+    try { chrome.runtime.onMessage.removeListener(onWorkerMessage); } catch {}
+    // A later injection into this world - only possible if something other than a reload took
+    // this one down - starts afresh rather than finding a flag for an overlay that is gone.
+    if (window.__ccOverlay === (cfg.build || true)) window.__ccOverlay = undefined;
+  }
+  host.addEventListener('cc-overlay-replace', teardown, { signal: alive });
+
+  /**
+   * An orphaned overlay leaves, but not from under a comment being written: its text would go
+   * with it. That panel stays, and says the extension was reloaded when Send is pressed, until it
+   * is closed - after which the next check takes it down.
+   */
+  function checkAlive() {
+    if (!connected() && !holdsWork()) teardown();
+  }
+  // Asking `chrome.runtime.id` is a property read. A tab in the background is looked at again
+  // when it is shown, and a visible one every few seconds.
+  const pulse = setInterval(checkAlive, 5000);
+  document.addEventListener('visibilitychange', checkAlive, { signal: alive });
 
   /**
    * Tests only - see test/overlay.test.mjs, which runs this exact file inside a DOM.
@@ -2874,6 +2973,9 @@
       elementsInRegion, findQuote, pageKey, selectorStep, unique,
       openList: () => setList(true),
       reanchorNow: () => reanchorPromise,
+      // What a click on this element in comment mode does. The tool's own buttons and keys answer
+      // trusted events only, which a test cannot make, so this is the way into a panel from here.
+      compose: (node) => { const a = describe(node); openPopover(a, locatorFor(a, node)); },
     });
   }
 })();
