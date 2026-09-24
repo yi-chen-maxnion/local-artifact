@@ -375,20 +375,82 @@ function readSnap(previewId, hash) {
 }
 
 /**
+ * The versions of a preview kept on disk, most recently served or used first. A file whose bytes
+ * do not hash to its name is skipped rather than trusted.
+ */
+function snapVersions(previewId) {
+  const prefix = snapPrefix(previewId);
+  if (!prefix) return [];
+  try {
+    return fs.readdirSync(STATE_DIR)
+      .filter((name) => name.startsWith(prefix) && !name.endsWith('.tmp'))
+      .map((name) => {
+        const file = path.join(STATE_DIR, name);
+        try { return { file, name, t: fs.statSync(file).mtimeMs }; } catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.t - a.t)
+      .map(({ file, name }) => {
+        try {
+          const html = fs.readFileSync(file, 'utf8');
+          const hash = fileHash(html);
+          return name === `${prefix}${hash.slice(0, 16)}` ? { file, html, hash } : null;
+        } catch { return null; }
+      })
+      .filter(Boolean);
+  } catch { return []; }
+}
+
+/**
+ * The served HTML file a page is, from its URL: `{ previewId, pv }` for the entry page of a file
+ * this bridge serves at `/p/<id>/`, else null.
+ *
+ * Not from the preview id the extension sends. Every tab on this origin is bound to the origin's
+ * record, so that id is the same for every file served here and names none of them; the URL is
+ * the only thing the extension has that does. Only the entry itself counts: a page further down
+ * the tree is another document, and a source taken against the entry would describe the wrong one.
+ */
+function servedHtml(pageUrl) {
+  let u;
+  try { u = new URL(pageUrl || ''); } catch { return null; }
+  if (u.origin !== ORIGIN) return null;
+  const m = /^\/p\/([^/]+)\/$/.exec(u.pathname);
+  const pv = m ? previews.get(m[1]) : null;
+  if (pv?.kind !== 'html' || !pv.entry) return null;
+  return { previewId: m[1], pv };
+}
+
+/**
  * Where a comment on a served HTML file was pointing, in that file, or null.
  * Null is not a failed comment: the pin keeps its selector and nothing more.
+ *
+ * Captured against the file as it is now, when the element there is the one the user pointed at.
+ * When it is not, the tab is showing an older version - Claude wrote the file after it loaded -
+ * and the versions served since are tried, most recent first. The first one where the anchor is
+ * found and agrees is the one the tab showed; the source is taken against it and carries its
+ * hash, and the next /reanchor moves the pin from there onto the file as it is. None agreeing is
+ * no source, as before.
  */
-function sourceFor(previewId, pv, pageUrl, anchor) {
-  if (pv?.kind !== 'html' || !pv.entry) return null;
-  if (fileFor(pageUrl) !== pv.entry) return null;
-  const buf = readIfFile(pv.entry);
+function sourceFor(file, anchor) {
+  if (!file) return null;
+  const buf = readIfFile(file.pv.entry);
   if (!buf) return null;
   const html = buf.toString('utf8');
   try {
     const source = captureSource(html, anchor || {});
-    if (!source) return null;
-    writeSnap(previewId, html, source.hash);
-    return source;
+    if (source) {
+      writeSnap(file.previewId, html, source.hash);
+      return source;
+    }
+    const current = fileHash(html);
+    for (const version of snapVersions(file.previewId)) {
+      if (version.hash === current) continue;
+      const earlier = captureSource(version.html, anchor || {});
+      if (!earlier) continue;
+      touchSnap(version.file);
+      return earlier;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -844,6 +906,10 @@ const server = http.createServer(async (req, res) => {
         if (pv.kind === 'html') {
           const buf = readIfFile(pv.entry);
           if (!buf) return html(res, 404, gonePage(previewId));
+          // The version this tab is about to show. Claude may write the file while the user is
+          // still reading it, and a comment from this tab has to be anchored against these bytes,
+          // not the ones on disk by then - see sourceFor.
+          writeSnap(previewId, buf.toString('utf8'));
           return send(res, 200, contentType(pv.entry), buf);
         }
         // An image is linked from the wrapper page, not read into it.
@@ -946,7 +1012,9 @@ const server = http.createServer(async (req, res) => {
       // For the overlay, not the session. The notification already describes the anchor; this is
       // how the pin finds it again after the file is edited. Missing means the pin stays as it
       // was — a comment is not refused because the file could not be anchored.
-      const source = sourceFor(b.previewId, pv, b.page?.url, b.anchor);
+      // The file comes from the page's URL, not from `b.previewId`: that is the origin's id,
+      // shared by every page on it - see servedHtml.
+      const source = sourceFor(servedHtml(b.page?.url), b.anchor);
       return json(res, 200, { ok: true, n, shot: Boolean(shot), ...(source ? { source } : {}) });
     }
 
@@ -955,17 +1023,19 @@ const server = http.createServer(async (req, res) => {
      * looking at the file, where each pin's source anchor went. Extension-only, like /comment:
      * the answer is where the user's pins move, and a page does not get to say.
      *
-     * A preview that is not a file we serve answers with nothing to move. The overlay leaves
-     * those pins on their selectors.
+     * The file is the page the overlay is on, named by `pageUrl`; `previewId` is the origin's
+     * and names no file - see servedHtml. A page that is not a file we serve answers with nothing
+     * to move, and the overlay leaves those pins on their selectors. Nothing inside a pin's source
+     * says which file it is: the source is the overlay's to send, and says only what it recorded.
      */
     if (p === '/reanchor' && req.method === 'POST') {
       if (!isExtension(req.headers.origin)) {
         return json(res, 403, { error: 'only the extension may reanchor' });
       }
       const b = await readBody(req);
-      const pv = previews.get(b.previewId);
-      if (!pv?.entry || pv.kind !== 'html') return json(res, 200, { pins: [] });
-      const buf = readIfFile(pv.entry);
+      const file = servedHtml(b.pageUrl);
+      if (!file) return json(res, 200, { pins: [] });
+      const buf = readIfFile(file.pv.entry);
       if (!buf) return json(res, 404, { error: 'file is gone' });
       const html = buf.toString('utf8');
       // One parse of the file on disk and of each old version, however many pins ask, and one
@@ -974,7 +1044,7 @@ const server = http.createServer(async (req, res) => {
       const hash = fileHash(html);
       const versions = new Map();
       const versionOf = (h) => {
-        if (!versions.has(h)) versions.set(h, readSnap(b.previewId, h));
+        if (!versions.has(h)) versions.set(h, readSnap(file.previewId, h));
         return versions.get(h);
       };
       const pins = Array.isArray(b.pins) ? b.pins.slice(0, 100) : [];
@@ -994,7 +1064,7 @@ const server = http.createServer(async (req, res) => {
       // A pin that moved now carries a source for this version, and a pin already on it has one,
       // so this version is what the next edit has to be matched from. Kept whether or not the
       // overlay adopts the move: a pin that does not still has its old version, also kept.
-      if (moved || out.some((r) => r.same)) writeSnap(b.previewId, html, hash);
+      if (moved || out.some((r) => r.same)) writeSnap(file.previewId, html, hash);
       return json(res, 200, { hash, pins: out });
     }
 

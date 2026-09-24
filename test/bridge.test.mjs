@@ -363,22 +363,36 @@ describe('bridge', () => {
     });
   });
 
+  /**
+   * Driven the way the extension drives it. Every tab on the bridge's own origin is bound to the
+   * id /resolve gives that origin, so that is the `previewId` a comment and a reanchor carry, and
+   * the file is named only by the page's URL, `/p/<fileId>/`. These tests once passed the file's
+   * id as `previewId`, which the extension never does, and were green while the feature never ran.
+   */
   describe('/reanchor', () => {
     let monitor;
+    let bound;
     const ext = { token: null, headers: { origin: 'chrome-extension://abc' } };
-    const reanchor = (previewId, pins) => bridge.request('/reanchor', { ...ext, json: { previewId, pins } });
+    const pageOf = (fileId) => `${bridge.origin}/p/${fileId}/`;
+    const reanchor = (fileId, pins) => bridge.request('/reanchor', {
+      ...ext, json: { previewId: bound, pageUrl: pageOf(fileId), pins },
+    });
+    const commentAt = (fileId, fields) => comment(bridge, bound, { page: { url: pageOf(fileId) }, ...fields });
 
-    before(async () => { monitor = await listen(bridge, key); });
+    before(async () => {
+      monitor = await listen(bridge, key);
+      bound = await originId(bridge, bridge.origin);
+    });
     after(() => monitor.close());
 
     test('a comment on a served HTML file comes back with a source anchor for that file', async () => {
       const file = path.join(files, 'reanchor.html');
       const html = '<!doctype html><html><body><h1 id="t">Hello</h1></body></html>';
       fs.writeFileSync(file, html);
-      const { previewId } = await open(bridge, key, file);
-      const res = await comment(bridge, previewId, {
+      const { previewId: fileId } = await open(bridge, key, file);
+      assert.notEqual(fileId, bound);
+      const res = await commentAt(fileId, {
         comment: 'retitle',
-        page: { url: `${bridge.origin}/p/${previewId}/` },
         anchor: { kind: 'element', id: 't', chain: [{ tag: 'h1', index: 0 }] },
       });
       assert.equal(res.status, 200);
@@ -388,31 +402,50 @@ describe('bridge', () => {
       // The session is not told how to move the pin. That stays between the bridge and the overlay.
       assert.equal((await monitor.next()).source, undefined);
 
-      const same = await (await reanchor(previewId, [{ n: body.n, source: body.source }])).json();
+      const same = await (await reanchor(fileId, [{ n: body.n, source: body.source }])).json();
       assert.deepEqual(same.pins, [{ n: body.n, same: true }]);
 
       const edited = '<!doctype html><html><body><div class="wrap"><h1 id="t">Welcome</h1></div></body></html>';
       fs.writeFileSync(file, edited);
-      const moved = await (await reanchor(previewId, [{ n: body.n, source: body.source }])).json();
+      const moved = await (await reanchor(fileId, [{ n: body.n, source: body.source }])).json();
       assert.deepEqual(moved.pins[0].chain, [{ tag: 'div', index: 0 }, { tag: 'h1', index: 0 }]);
       assert.equal(moved.pins[0].id, 't');
       assert.equal(moved.pins[0].tag, 'h1');
       assert.equal(moved.pins[0].source.hash, fileHash(edited));
 
       fs.writeFileSync(file, '<!doctype html><html><body><p>gone</p></body></html>');
-      const lost = await (await reanchor(previewId, [{ n: body.n, source: body.source }])).json();
+      const lost = await (await reanchor(fileId, [{ n: body.n, source: body.source }])).json();
       assert.deepEqual(lost.pins, [{ n: body.n, lost: true }]);
+    });
+
+    test('the file is the page\'s URL, never the id sent beside it or inside a source', async () => {
+      const file = path.join(files, 'reanchor-shape.html');
+      fs.writeFileSync(file, '<!doctype html><html><body><h1 id="t">Hello</h1></body></html>');
+      const { previewId: fileId } = await open(bridge, key, file);
+      const anchor = { kind: 'element', id: 't', chain: [{ tag: 'h1', index: 0 }] };
+      const { source } = await (await commentAt(fileId, { anchor })).json();
+      await monitor.next();
+      assert.ok(source);
+      fs.writeFileSync(file, '<!doctype html><html><body><div><h1 id="t">Welcome</h1></div></body></html>');
+      const ask = (json) => bridge.request('/reanchor', { ...ext, json }).then((r) => r.json());
+      // The file's own id as `previewId`, with no page: the old assumption. It names nothing now.
+      assert.deepEqual((await ask({ previewId: fileId, pins: [{ n: 1, source }] })).pins, []);
+      // An id riding inside the source is not read either.
+      assert.deepEqual((await ask({ previewId: bound, pins: [{ n: 1, source: { ...source, previewId: fileId } }] })).pins, []);
+      // A page below the entry is another document, not this file.
+      assert.deepEqual((await ask({ previewId: bound, pageUrl: `${pageOf(fileId)}other.html`, pins: [{ n: 1, source }] })).pins, []);
+      const res = await comment(bridge, fileId, { page: { url: `${pageOf(fileId)}other.html` }, anchor });
+      assert.equal((await res.json()).source, undefined);
+      await monitor.next();
+      // And the shape the extension does send moves it.
+      assert.equal((await ask({ previewId: bound, pageUrl: pageOf(fileId), pins: [{ n: 1, source }] })).pins[0].id, 't');
     });
 
     test('a chain the file does not contain still delivers the comment, with no source', async () => {
       const file = path.join(files, 'reanchor-miss.html');
       fs.writeFileSync(file, '<!doctype html><html><body><h1>Hi</h1></body></html>');
-      const { previewId } = await open(bridge, key, file);
-      const res = await comment(bridge, previewId, {
-        comment: 'somewhere',
-        page: { url: `${bridge.origin}/p/${previewId}/` },
-        anchor: { chain: [{ tag: 'h1', index: 4 }] },
-      });
+      const { previewId: fileId } = await open(bridge, key, file);
+      const res = await commentAt(fileId, { comment: 'somewhere', anchor: { chain: [{ tag: 'h1', index: 4 }] } });
       assert.equal(res.status, 200);
       assert.equal((await res.json()).source, undefined);
       await monitor.next();
@@ -421,60 +454,58 @@ describe('bridge', () => {
     test('a preview that is not served HTML grows no source and moves no pin', async () => {
       const file = path.join(files, 'reanchor-notes.txt');
       fs.writeFileSync(file, 'just text');
-      const { previewId } = await open(bridge, key, file);
-      const res = await comment(bridge, previewId, {
-        comment: 'note',
-        page: { url: `${bridge.origin}/p/${previewId}/` },
-        anchor: { kind: 'element', chain: [{ tag: 'p', index: 0 }] },
-      });
+      const { previewId: fileId } = await open(bridge, key, file);
+      const res = await commentAt(fileId, { comment: 'note', anchor: { kind: 'element', chain: [{ tag: 'p', index: 0 }] } });
       assert.equal(res.status, 200);
       assert.equal((await res.json()).source, undefined);
       await monitor.next();
+      assert.deepEqual((await (await reanchor(fileId, [{ n: 1, source: { hash: 'x' } }])).json()).pins, []);
       const origin = await originId(bridge, 'http://localhost:5199');
-      assert.deepEqual((await (await reanchor(origin, [{ n: 1, source: { hash: 'x' } }])).json()).pins, []);
+      const dev = await bridge.request('/reanchor', {
+        ...ext, json: { previewId: origin, pageUrl: 'http://localhost:5199/', pins: [{ n: 1, source: { hash: 'x' } }] },
+      });
+      assert.deepEqual((await dev.json()).pins, []);
     });
 
     test('comes from the extension or from nowhere', async () => {
       const file = path.join(files, 'reanchor.html');
-      const { previewId } = await open(bridge, key, file);
+      const { previewId: fileId } = await open(bridge, key, file);
       for (const headers of [{ origin: 'https://evil.example' }, {}]) {
-        const res = await bridge.request('/reanchor', { token: null, headers, json: { previewId, pins: [] } });
+        const res = await bridge.request('/reanchor', {
+          token: null, headers, json: { previewId: bound, pageUrl: pageOf(fileId), pins: [] },
+        });
         assert.equal(res.status, 403);
       }
-      assert.equal((await reanchor(previewId, [])).status, 200);
+      assert.equal((await reanchor(fileId, [])).status, 200);
     });
 
     /** The page a paragraph pin lives on, with `paras` as its paragraphs. */
     const paragraphs = (paras) => `<!doctype html><html><body><main>${paras.map((t) => `<p>${t}</p>`).join('')}</main></body></html>`;
-    const commentOn = async (previewId, chain, text) => {
-      const res = await comment(bridge, previewId, {
-        comment: 'this one',
-        page: { url: `${bridge.origin}/p/${previewId}/` },
-        anchor: { kind: 'element', chain, text },
-      });
+    const commentOn = async (fileId, chain, text) => {
+      const res = await commentAt(fileId, { comment: 'this one', anchor: { kind: 'element', chain, text } });
       assert.equal(res.status, 200);
       await monitor.next();
       return res.json();
     };
-    const snapshots = (previewId) => fs.readdirSync(bridge.stateDir).filter((f) => f.startsWith(`snap-${bridge.port}-${previewId}-`));
+    const snapshots = (fileId) => fs.readdirSync(bridge.stateDir).filter((f) => f.startsWith(`snap-${bridge.port}-${fileId}-`));
 
     test('a pin that moved is matched from the version it moved to, edit after edit', async () => {
       const file = path.join(files, 'reanchor-twice.html');
       fs.writeFileSync(file, paragraphs(['alpha', 'beta', 'gamma']));
-      const { previewId } = await open(bridge, key, file);
-      const first = await commentOn(previewId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }], 'beta');
+      const { previewId: fileId } = await open(bridge, key, file);
+      const first = await commentOn(fileId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }], 'beta');
       assert.ok(first.source);
 
       // The pinned paragraph is rewritten: matched by the tree, from the version it was left on.
       fs.writeFileSync(file, paragraphs(['alpha', 'beta, revised', 'gamma']));
-      const once = (await (await reanchor(previewId, [{ n: first.n, source: first.source }])).json()).pins[0];
+      const once = (await (await reanchor(fileId, [{ n: first.n, source: first.source }])).json()).pins[0];
       assert.deepEqual(once.chain, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }]);
 
       // Again, with a paragraph inserted before it. The overlay now holds the source it was given,
       // for the version above - which is the version this edit has to be matched from.
       const again = paragraphs(['alpha', 'inserted', 'beta, revised twice', 'gamma']);
       fs.writeFileSync(file, again);
-      const twice = (await (await reanchor(previewId, [{ n: first.n, source: once.source }])).json()).pins[0];
+      const twice = (await (await reanchor(fileId, [{ n: first.n, source: once.source }])).json()).pins[0];
       assert.deepEqual(twice.chain, [{ tag: 'main', index: 0 }, { tag: 'p', index: 2 }]);
       assert.equal(twice.source.hash, fileHash(again));
     });
@@ -482,47 +513,75 @@ describe('bridge', () => {
     test('a second comment on the same file does not take the first one\'s version away', async () => {
       const file = path.join(files, 'reanchor-second.html');
       fs.writeFileSync(file, paragraphs(['alpha', 'beta', 'gamma']));
-      const { previewId } = await open(bridge, key, file);
-      const first = await commentOn(previewId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }], 'beta');
+      const { previewId: fileId } = await open(bridge, key, file);
+      const first = await commentOn(fileId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }], 'beta');
       fs.writeFileSync(file, paragraphs(['alpha', 'beta', 'gamma', 'delta']));
-      const second = await commentOn(previewId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 3 }], 'delta');
+      const second = await commentOn(fileId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 3 }], 'delta');
       assert.notEqual(second.source.hash, first.source.hash);
 
       fs.writeFileSync(file, paragraphs(['alpha', 'beta, revised', 'gamma', 'delta']));
-      const { pins } = await (await reanchor(previewId, [{ n: first.n, source: first.source }])).json();
+      const { pins } = await (await reanchor(fileId, [{ n: first.n, source: first.source }])).json();
       assert.deepEqual(pins[0].chain, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }]);
     });
 
     test('ten edits on, the pin still follows, and only the newest versions are kept', async () => {
       const file = path.join(files, 'reanchor-many.html');
       fs.writeFileSync(file, paragraphs(['alpha', 'beta 0', 'gamma']));
-      const { previewId } = await open(bridge, key, file);
-      let { n, source } = await commentOn(previewId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }], 'beta 0');
+      const { previewId: fileId } = await open(bridge, key, file);
+      let { n, source } = await commentOn(fileId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }], 'beta 0');
       for (let i = 1; i <= 10; i++) {
         fs.writeFileSync(file, paragraphs(['alpha', `beta ${i}${' and more'.repeat(i)}`, 'gamma']));
-        const [pin] = (await (await reanchor(previewId, [{ n, source }])).json()).pins;
+        const [pin] = (await (await reanchor(fileId, [{ n, source }])).json()).pins;
         assert.deepEqual(pin.chain, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }], `edit ${i}`);
         source = pin.source;
       }
-      assert.equal(snapshots(previewId).length, 8);
+      assert.equal(snapshots(fileId).length, 8);
       // A snapshot is trusted by its content, not its name: another version's bytes under this
       // version's name are not this version.
       const other = paragraphs(['alpha', 'beta 0', 'gamma']);
-      for (const name of snapshots(previewId)) fs.writeFileSync(path.join(bridge.stateDir, name), other);
+      for (const name of snapshots(fileId)) fs.writeFileSync(path.join(bridge.stateDir, name), other);
       fs.writeFileSync(file, paragraphs(['alpha', 'beta, rewritten once more', 'gamma']));
-      assert.deepEqual((await (await reanchor(previewId, [{ n, source }])).json()).pins, [{ n, lost: true }]);
+      assert.deepEqual((await (await reanchor(fileId, [{ n, source }])).json()).pins, [{ n, lost: true }]);
     });
 
-    test('a comment from a tab older than the file records no source', async () => {
+    /**
+     * The user reviews while Claude edits: the tab loaded one version, the file on disk is the
+     * next, and the comment's chain and text are the tab's. The bridge kept the bytes it served
+     * that tab, so the comment is anchored against them, and the reanchor on the next load moves
+     * the pin across the edit it missed.
+     */
+    test('a comment from a tab older than the file is anchored against the version the tab was served', async () => {
       const file = path.join(files, 'reanchor-stale.html');
-      // The tab shows ['one', 'two', 'three'] and the user points at 'two'. Claude has since
-      // inserted a paragraph, so the file's second paragraph is 'one'.
+      const cards = (texts) => `<!doctype html><html><body><h1>Stale tab</h1>${texts.map((t) => `<p class="card">${t}</p>`).join('')}</body></html>`;
+      const v1 = cards(['One: the first card.', 'Two: the commented card.', 'Three: the third card.']);
+      fs.writeFileSync(file, v1);
+      const { previewId: fileId } = await open(bridge, key, file);
+      // The tab loads.
+      const served = await bridge.request(`/p/${fileId}/`, { token: null });
+      assert.equal(await served.text(), v1);
+      // Claude inserts a card before the one the user is about to point at.
+      fs.writeFileSync(file, cards(['One: the first card.', 'NEW: inserted while the tab was stale.', 'Two: the commented card.', 'Three: the third card.']));
+      const stale = await commentOn(fileId, [{ tag: 'p', index: 1 }], 'Two: the commented card.');
+      assert.equal(stale.source.hash, fileHash(v1));
+      assert.match(stale.source.exact, /Two: the commented card/);
+      // One more edit, and the tab is reloaded.
+      const now = cards(['One: the first card.', 'NEW: inserted while the tab was stale.', 'Two: the commented card.', 'Three: the third card, edited later.']);
+      fs.writeFileSync(file, now);
+      const [pin] = (await (await reanchor(fileId, [{ n: stale.n, source: stale.source }])).json()).pins;
+      assert.deepEqual(pin.chain, [{ tag: 'p', index: 2 }]);
+      assert.equal(pin.source.hash, fileHash(now));
+    });
+
+    test('a comment from a tab older than every kept version records no source', async () => {
+      const file = path.join(files, 'reanchor-staler.html');
+      // The tab shows ['one', 'two', 'three'] - a version this bridge never served - and the user
+      // points at 'two'. The file's second paragraph is 'one'.
       fs.writeFileSync(file, paragraphs(['zero', 'one', 'two', 'three']));
-      const { previewId } = await open(bridge, key, file);
-      const stale = await commentOn(previewId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }], 'two');
+      const { previewId: fileId } = await open(bridge, key, file);
+      const stale = await commentOn(fileId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 1 }], 'two');
       assert.equal(stale.source, undefined);
-      assert.deepEqual(snapshots(previewId), []);
-      const fresh = await commentOn(previewId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 2 }], 'two');
+      assert.deepEqual(snapshots(fileId), []);
+      const fresh = await commentOn(fileId, [{ tag: 'main', index: 0 }, { tag: 'p', index: 2 }], 'two');
       assert.match(fresh.source.exact, /<p>two<\/p>/);
     });
   });

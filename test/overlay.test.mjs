@@ -825,6 +825,57 @@ describe('reanchor: a served HTML file', () => {
     } finally { await w.close(); }
   });
 
+  test('asks about the page it is on: the id it is bound under names no file', async () => {
+    let asked = null;
+    const w = await served('<!doctype html><html><body><h1 id="t">Hello</h1></body></html>', {
+      kind: 'element', selector: '#t', n: 1, comment: 'x', page: here, source: { hash: 'old' }, ts: 1,
+    }, (msg, respond) => { asked = msg.payload; respond({ pins: [{ n: 1, same: true }] }); });
+    try {
+      await w.api.reanchorNow();
+      assert.equal(asked.pageUrl, origin + here);
+      assert.equal(asked.previewId, previewId);
+    } finally { await w.close(); }
+  });
+
+  /**
+   * jsdom lays nothing out, so every element measures 0 x 0 and every pin would read as lost.
+   * The page gives its elements a box before the overlay arrives, so drawn and not drawn differ.
+   */
+  const measured = (body) => `<!doctype html><html><body><script>
+    Element.prototype.getBoundingClientRect = function () {
+      return { x: 10, y: 10, width: 100, height: 20, top: 10, left: 10, right: 110, bottom: 30 };
+    };
+  </script>${body}</body></html>`;
+  const drawn = (w) => [...w.shadow.querySelectorAll('button.pin')].map((b) => b.textContent);
+
+  test('a lost answer is not drawn on a selector that now hits another element', async () => {
+    // The second card was deleted. The selector it was pinned by is the third card now.
+    const w = await served(measured('<h1>Page</h1><p class="card">One</p><p class="card">Three</p>'), {
+      kind: 'element', selector: 'p.card:nth-of-type(2)', n: 1, comment: 'the second card', page: here,
+      source: { hash: 'old', kind: 'element' }, ts: 1,
+    }, (_msg, respond) => respond({ pins: [{ n: 1, lost: true }] }));
+    try {
+      await w.api.reanchorNow();
+      assert.deepEqual(drawn(w), []);
+      w.api.openList();
+      assert.match(w.shadow.querySelector('.item.lost')?.textContent || '', /the second card/);
+      // Kept, so the next load asks again: an edit that restores the card brings the pin back.
+      assert.equal(saved(w)[0].source.hash, 'old');
+      assert.equal(saved(w)[0].selector, 'p.card:nth-of-type(2)');
+    } finally { await w.close(); }
+  });
+
+  test('no answer from the bridge leaves the selector to draw the pin', async () => {
+    const w = await served(measured('<h1>Page</h1><p class="card">One</p><p class="card">Two</p>'), {
+      kind: 'element', selector: 'p.card:nth-of-type(2)', n: 1, comment: 'the second card', page: here,
+      source: { hash: 'old', kind: 'element' }, ts: 1,
+    }, (_msg, respond) => respond({ error: 'the bridge did not answer in time', code: 'bridge_timeout' }));
+    try {
+      await w.api.reanchorNow();
+      assert.deepEqual(drawn(w), ['1']);
+    } finally { await w.close(); }
+  });
+
   test('a chain the DOM on screen does not contain is not written', async () => {
     const w = await served('<!doctype html><html><body><h1 id="t">Hello</h1></body></html>', {
       kind: 'element', selector: '#t', n: 1, comment: 'x', page: here,

@@ -534,20 +534,27 @@ as lost: the comment was left here, it just cannot be pointed at right now.
 **A served HTML file is the exception, and only that file.** Claude edits the file the bridge is
 serving, which is exactly the text and the class the selector was built from, so on reload the
 pin would stay lost on top of the element it still means. When the comment is sent the bridge
-records a source anchor against the file as it is then — a slice of the source, the context
-around it, and where it sat in the tree — and keeps that version of the bytes, named by its hash.
-The file may already be newer than the tab the user is looking at, so the element the file has at
-that spot must agree with what was pointed at, by tag and by the start of its text; if it does
-not, no anchor is recorded and the pin is only its selector. The next time the overlay loads the
+records a source anchor against the file — a slice of the source, the context around it, and
+where it sat in the tree — and keeps that version of the bytes, named by its hash. Which file is
+read from the page's URL, `/p/<id>/`: every tab on the bridge's origin is bound to that origin's
+one id, which names no file. The bridge also keeps the bytes it serves each time it serves the
+page, because the file may already be newer than the tab the user is looking at. The element the
+file has at that spot must agree with what was pointed at, by tag and by the start of its text;
+if the file as it is now does not, the versions served before it are tried, most recent first,
+and the anchor is recorded against the first that agrees — the one the tab was showing. If none
+does, no anchor is recorded and the pin is only its selector. The next time the overlay loads the
 file it asks `/reanchor`. A unique match moves the pin: the selector is rebuilt from the node the
 chain names, and only if that node is actually in the DOM on screen. The pin then carries an
 anchor for the new version, and that version is kept too, so the edit after it is matched from
-there; the newest eight versions of a file are kept. A tie, or a chain the current DOM does not
-contain, leaves the pin where it was. The match has a clock and a size limit, because it runs on
-the loop every session's comments arrive on; past either, the pin is lost for that load and asked
-about again on the next. Lost still means lost. The model is not asked to update anything, and
-nothing is written into the file. A dev server is not this case: there the DOM is not the file,
-and a miss stays a miss.
+there; the newest eight versions of a file are kept. An answer that the element is gone —
+deleted, or a tie between copies nothing tells apart — makes the pin lost for that load: not
+drawn, and listed as lost, because the old selector would point at whatever took its place. It
+keeps its anchor, and the next load asks again. No answer in time, or a chain the current DOM does
+not contain, leaves the pin on its selector. The match has a clock and a size limit, because it
+runs on the loop every session's comments arrive on; past either, the answer is lost for that
+load. Lost still means lost. The model is not asked to update anything, and nothing is written
+into the file. A dev server is not this case: there the DOM is not the file, and a miss stays a
+miss.
 
 The scroll listener is registered in the **capture phase**, which is the other half of the same
 bug. Scroll events do not bubble, so the plain listener it replaced only ever heard the *window*

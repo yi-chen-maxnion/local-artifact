@@ -154,6 +154,34 @@ describe('relocate does not stick to the twin that still has the old text', () =
   });
 });
 
+/**
+ * Found in a real browser, each a pin that landed on the wrong element or stayed lost when the
+ * element was plainly still there.
+ */
+describe('reorders, moves and deletions', () => {
+  const cards = (texts, keep) => `<h1>Twins</h1>${texts.map((t, i) => `<p class="card"${i === keep ? ' data-fixture="keep"' : ''}>${t}</p>`).join('')}`;
+  const alpha = 'Alpha: not a twin.';
+  const twin = 'Twin card with identical text.';
+  const omega = 'Omega: not a twin.';
+
+  test('reordered, and an unchanged sibling slid into the commented twin\'s place, is not it', () => {
+    // After: Twin, Alpha, Omega, Twin. Alpha kept its bytes, so it is Alpha, wherever it stands;
+    // which twin is which, nothing in the edit says.
+    stayLost(cards([alpha, twin, twin, omega], 2), cards([twin, alpha, omega, twin]));
+  });
+
+  test('moved to the end, unchanged, the one copy of its bytes in either file', () => {
+    follow(
+      cards(['One: the first card.', 'Two: the commented card.', 'Three: the third card.'], 1),
+      cards(['One: the first card.', 'Three: the third card.', 'Two: the commented card.'], 2),
+    );
+  });
+
+  test('the first of two twins deleted: the copy left may be either one, so it is lost', () => {
+    stayLost(cards([alpha, twin, twin, omega], 2), cards([alpha, twin, omega]));
+  });
+});
+
 describe('selections and regions', () => {
   test('the quote is still there, only the wrapping tag changed', () => {
     const oldHtml = '<p data-fixture="keep">brave new world</p>';

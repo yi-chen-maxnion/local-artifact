@@ -2408,9 +2408,19 @@
    * when it names a node that is on screen and agrees about tag, id and testid. A chain the
    * current DOM does not contain — the tab is still the pre-edit file — is not written, so the
    * selector keeps describing what is actually showing.
+   *
+   * A `lost` answer is the bridge saying the element is not in the file any more. The selector
+   * is then not an answer at all: `p.card:nth-of-type(2)` after the second card was deleted is
+   * the third card, pointed at confidently. So the pin is lost for this load - not drawn, and
+   * listed and counted as lost - and keeps its source and its selector, so the next load asks
+   * again. Only this answer does it; no answer, `same` and `skipped` leave the selector to speak.
    */
   function adoptReanchor(pin, result) {
-    if (!result || result.same || result.lost || result.skipped || !Array.isArray(result.chain)) return false;
+    if (result?.lost) {
+      pin._gone = true;
+      return false;
+    }
+    if (!result || result.same || result.skipped || !Array.isArray(result.chain)) return false;
     const node = nodeFromChain(result.chain);
     if (!node) return false;
     if (result.tag && node.localName !== result.tag) return false;
@@ -2434,6 +2444,9 @@
     if (!mine.length) return;
     const j = await askExtension('reanchor', {
       previewId: cfg.previewId,
+      // Which file this is, for the bridge. `previewId` is the id this origin is bound under -
+      // every tab on the bridge's origin shares it - and names no file.
+      pageUrl: location.href,
       pins: mine.map((p) => ({ n: p.n, source: p.source })),
     }, 3000);
     if (!j || j.error || !Array.isArray(j.pins)) return;
@@ -2508,6 +2521,8 @@
    */
   function resolveRects(p) {
     const boxes = (list) => list.filter((r) => r.w > 0 || r.h > 0);
+    // The bridge said the element is gone from the file - see adoptReanchor.
+    if (p._gone) return null;
 
     if (p.kind === 'selection') {
       if (!p._miss && (!p._range || !p._range.startContainer?.isConnected)) {
