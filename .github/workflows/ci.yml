@@ -1,0 +1,49 @@
+# Every push and pull request: the suite and the source check, on macOS, which is the only
+# platform the plugin runs on (`open -a`, `pbcopy`, and rename semantics the folder sync is
+# written against).
+#
+# On main, one more thing. main is what a new install takes and what auto-update compares, so
+# every commit on it is a release: cut by `npm run release`, which pushes main, dev and the tag
+# in one atomic push. A main whose HEAD is not tagged v<plugin.json version> got there some other
+# way - a direct push, a merge on GitHub - and users would be handed it; this job fails so that
+# is seen at once.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run check
+      - name: main is a tagged release with agreeing versions
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          node --input-type=module -e "
+            import { versionsIn } from './scripts/release.mjs';
+            const found = versionsIn();
+            const want = found['.claude-plugin/plugin.json'];
+            const off = Object.entries(found).filter(([, v]) => v !== want);
+            if (off.length) {
+              console.log('::error::version sources disagree: ' + JSON.stringify(found));
+              process.exit(1);
+            }
+          "
+          version=$(node -p "require('./.claude-plugin/plugin.json').version")
+          if ! git tag --points-at HEAD | grep -qx "v${version}"; then
+            echo "::error::main HEAD is not tagged v${version} - releases go through npm run release"
+            exit 1
+          fi
+          echo "main is release v${version}"

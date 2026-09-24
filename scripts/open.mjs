@@ -13,7 +13,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, bridge, health, openInBrowser, resolveSession } from '../lib/common.mjs';
+import { EXT_DIR, bridge, health, openInBrowser, resolveSession } from '../lib/common.mjs';
 import { installHint } from '../lib/format.mjs';
 
 /**
@@ -80,7 +80,7 @@ if (h.primary !== session.key) {
 // reached the daemon, so whatever this opens arrives in a browser with no button on it. Every
 // other precondition would be met and the file would look exactly as it should.
 if (!h.extension) {
-  refuse(`the extension has never reached the bridge - ${installHint(ROOT)}`, 3,
+  refuse(`the extension has never reached the bridge - ${installHint(h.extDir?.path || EXT_DIR)}`, 3,
     'Then open any page in Chrome once, so the bridge sees it, and try this again.');
 }
 

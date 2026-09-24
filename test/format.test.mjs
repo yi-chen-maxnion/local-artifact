@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extensionLine, fmt, slackMessage, stoppedLine } from '../lib/format.mjs';
+import { extensionLine, extensionStatus, fmt, slackMessage, stoppedLine } from '../lib/format.mjs';
 
 const base = {
   seq: 1, n: 3, previewId: 'abcdef123456', repo: 'web', comment: 'make it blue',
@@ -183,43 +183,122 @@ test('the session notification is plain text, so its backticks stay whole', () =
 
 /**
  * The one sentence every command says about the extension. It is the difference between a setup
- * that works and one that looks identical and does nothing, so each of the three states names the
- * thing to do about it - and the install path is the repo's own, since that is what the user has
- * to point "Load unpacked" at.
+ * that works and one that looks identical and does nothing, so each state names the thing to do
+ * about it - and the install path is the folder the daemon keeps the extension in, since that is
+ * what the user has to point "Load unpacked" at, once, for good.
  */
 describe('extensionLine', () => {
-  const ROOT = '/Users/someone/repos/local-artifact-plugin';
+  const DIR = '/Users/someone/.config/local-artifact/extension';
   const now = Date.UTC(2026, 8, 21, 12, 0, 0);
 
   test('never seen: the whole of the install, in one line', () => {
     assert.equal(
-      extensionLine(null, ROOT, now),
+      extensionLine(null, DIR, now),
       'extension  NOT SEEN - install it: chrome://extensions -> Developer mode -> Load unpacked -> '
-      + `${ROOT}/extension`,
+      + DIR,
     );
     // A record with no timestamp on it is the same thing as no record.
-    assert.equal(extensionLine({ id: 'x' }, ROOT, now), extensionLine(null, ROOT, now));
+    assert.equal(extensionLine({ id: 'x' }, DIR, now), extensionLine(null, DIR, now));
   });
 
   test('seen recently: how long ago, and nothing to do', () => {
-    assert.equal(extensionLine({ seenAt: now - 4000 }, ROOT, now), 'extension  seen 4s ago');
-    assert.equal(extensionLine({ seenAt: now - 90 * 1000 }, ROOT, now), 'extension  seen 2m ago');
+    assert.equal(extensionLine({ seenAt: now - 4000 }, DIR, now), 'extension  seen 4s ago');
+    assert.equal(extensionLine({ seenAt: now - 90 * 1000 }, DIR, now), 'extension  seen 2m ago');
     // The boundary itself is still "recently"; a second past it is not.
-    assert.match(extensionLine({ seenAt: now - (10 * 60 * 1000 - 1) }, ROOT, now), /^extension {2}seen /);
-    assert.match(extensionLine({ seenAt: now - 10 * 60 * 1000 }, ROOT, now), /^extension {2}last seen /);
+    assert.match(extensionLine({ seenAt: now - (10 * 60 * 1000 - 1) }, DIR, now), /^extension {2}seen /);
+    assert.match(extensionLine({ seenAt: now - 10 * 60 * 1000 }, DIR, now), /^extension {2}last seen /);
   });
 
   test('seen long ago: it was there once, so say what may have happened to it', () => {
     assert.equal(
-      extensionLine({ seenAt: now - 3 * 24 * 3600 * 1000 }, ROOT, now),
+      extensionLine({ seenAt: now - 3 * 24 * 3600 * 1000 }, DIR, now),
       'extension  last seen 3d ago - open a page in Chrome; if no button appears, '
       + 'reload it at chrome://extensions',
     );
-    assert.match(extensionLine({ seenAt: now - 2 * 3600 * 1000 }, ROOT, now), /^extension {2}last seen 2h ago - /);
+    assert.match(extensionLine({ seenAt: now - 2 * 3600 * 1000 }, DIR, now), /^extension {2}last seen 2h ago - /);
   });
 
   test('a clock that has gone backwards reads as now rather than as a negative age', () => {
-    assert.equal(extensionLine({ seenAt: now + 5000 }, ROOT, now), 'extension  seen 0s ago');
+    assert.equal(extensionLine({ seenAt: now + 5000 }, DIR, now), 'extension  seen 0s ago');
+  });
+
+  /**
+   * An update has reached the folder and the running extension has not caught up yet. It reloads
+   * itself on the bridge's next answer, so the line says so - rather than send someone to
+   * chrome://extensions for something that is a page load away.
+   */
+  test('behind the folder: both versions, and that it updates itself', () => {
+    const one = { id: 'a'.repeat(32), version: '0.1.1', seenAt: now - 4000 };
+    assert.equal(
+      extensionLine({ seenAt: now - 4000, version: '0.1.1' }, DIR, now, { latest: '0.2.0', extensions: [one] }),
+      'extension  seen 4s ago - extension 0.1.1, plugin 0.2.0 - it updates itself within a page load or two',
+    );
+    // Level with the folder, or ahead of it - a copy loaded from a checkout - is nothing to report.
+    for (const version of ['0.2.0', '0.3.0']) {
+      assert.equal(
+        extensionLine({ seenAt: now - 4000, version }, DIR, now, { latest: '0.2.0', extensions: [{ ...one, version }] }),
+        'extension  seen 4s ago',
+      );
+    }
+  });
+
+  /**
+   * A copy from before self-update says no version at all, and never will: it is the zip install,
+   * loaded from a folder nothing updates. On its own it is the only extension there is, so the fix
+   * is both halves - take it out, and load the folder that does update.
+   */
+  test('no version, on its own: an old copy - remove it and load the folder', () => {
+    const old = { id: 'a'.repeat(32), version: null, seenAt: now - 4000 };
+    assert.equal(
+      extensionLine({ seenAt: now - 4000, version: null }, DIR, now, { latest: '0.2.0', extensions: [old] }),
+      'extension  seen 4s ago - an old copy that cannot update itself; remove it at chrome://extensions '
+      + `and load ${DIR} instead`,
+    );
+  });
+
+  // A daemon from before versions reports neither, and cannot tell an old copy from a new one.
+  test('from a daemon too old to say, no version is not news', () => {
+    assert.equal(extensionLine({ seenAt: now - 4000 }, DIR, now, {}), 'extension  seen 4s ago');
+  });
+
+  /**
+   * Two ids in the last ten minutes: two copies loaded side by side, each putting its own overlay
+   * on every page. Whichever spoke last is the one the first line describes; the warning is about
+   * the pair, and names the folder to keep.
+   */
+  test('two copies loaded at once: a warning under the line', () => {
+    const fresh = { id: 'a'.repeat(32), version: '0.2.0', seenAt: now - 4000 };
+    const zip = { id: 'b'.repeat(32), version: null, seenAt: now - 60 * 1000 };
+    assert.equal(
+      extensionLine({ seenAt: now - 4000, version: '0.2.0' }, DIR, now, { latest: '0.2.0', extensions: [fresh, zip] }),
+      'extension  seen 4s ago\n'
+      + 'WARNING    an older copy of the extension is also loaded - remove it at chrome://extensions, '
+      + `keeping the one loaded from ${DIR}`,
+    );
+    // The same when the old copy is the one that spoke last: the pair is the problem either way.
+    assert.match(
+      extensionLine({ seenAt: now - 4000, version: null }, DIR, now, { latest: '0.2.0', extensions: [fresh, zip] }),
+      /^extension {2}seen 4s ago\nWARNING {4}an older copy of the extension is also loaded/,
+    );
+    // An id last heard from outside the window was removed, or is in another Chrome profile.
+    const gone = { ...zip, seenAt: now - 11 * 60 * 1000 };
+    assert.equal(
+      extensionLine({ seenAt: now - 4000, version: '0.2.0' }, DIR, now, { latest: '0.2.0', extensions: [fresh, gone] }),
+      'extension  seen 4s ago',
+    );
+  });
+
+  test('extensionStatus reads all of it from /health, and the folder from the daemon first', () => {
+    const h = {
+      extension: { seenAt: now - 4000, id: 'a'.repeat(32), version: '0.1.0' },
+      extensions: [{ id: 'a'.repeat(32), version: '0.1.0', seenAt: now - 4000 }],
+      extDir: { path: '/daemon/says/extension', version: '0.2.0' },
+    };
+    assert.match(extensionStatus(h, DIR, now), /extension 0\.1\.0, plugin 0\.2\.0/);
+    assert.match(extensionStatus({ extension: null, extDir: h.extDir }, DIR, now), /-> \/daemon\/says\/extension$/);
+    // An older daemon names no folder; the caller's own is the only answer there is.
+    assert.match(extensionStatus({ extension: null }, DIR, now), new RegExp(`-> ${DIR}$`));
+    assert.match(extensionStatus(null, DIR, now), /NOT SEEN/);
   });
 });
 

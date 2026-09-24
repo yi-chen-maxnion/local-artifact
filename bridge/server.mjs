@@ -2,8 +2,9 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  HOST, PORT, ORIGIN, PING_MS, ROOT, SESSION_KEY, STATE_DIR, STATE_FILE, TOKEN_FILE,
-  codeBuild, pidAlive, rateLimiter, readToken, shortId, writeFileAtomic,
+  EXT_DIR, HOST, PORT, ORIGIN, PING_MS, ROOT, SEMVER, SESSION_KEY, STATE_DIR, STATE_FILE, TOKEN_FILE,
+  codeBuild, manifestVersion, pidAlive, pluginVersion, rateLimiter, readToken, shortId, syncExtension,
+  writeFileAtomic,
 } from '../lib/common.mjs';
 import { captureSource, fileHash, relocator } from '../lib/reanchor.mjs';
 import { Store, decodeShot } from './store.mjs';
@@ -37,6 +38,14 @@ const INSTANCE = shortId(6);
 const TOKEN = shortId(16);
 const CONTROL = new Set(['/register', '/open', '/connect', '/disconnect', '/shutdown', '/events']);
 const BUILD = codeBuild(ROOT);
+/**
+ * The release this daemon was started from. /connect in a session still running an older copy of
+ * the plugin reads it and leaves this daemon alone rather than replace it with older code - see
+ * `ensureDaemon`. `PROTOCOL` is for a caller that needs to know what it may ask: it moves only if
+ * a route or a field is ever taken away, which so far none has been.
+ */
+const VERSION = pluginVersion(ROOT);
+const PROTOCOL = 1;
 
 /**
  * The only Host headers this daemon answers to. Anything else is a name that resolves to
@@ -119,11 +128,33 @@ const detached = new Map();
 /** Set once a shutdown has begun: from then on every request is refused. See `shutdown`. */
 let stopping = false;
 
+/**
+ * The extension folder Chrome loads from (see EXT_DIR), as this daemon last left it: what the
+ * start-up sync did, and the version now there. `latest` is read once and again after anything
+ * could have changed it, not per request - it rides on every response.
+ */
+const extDir = { path: EXT_DIR, version: null, sync: null };
+function readExtDir() {
+  extDir.version = manifestVersion(EXT_DIR);
+}
+
+/**
+ * On every response: the version of the extension in the folder Chrome loads from.
+ *
+ * This is how an extension learns there is a newer one of itself on disk. Its service worker sees
+ * the header on whatever it was asking anyway, compares it with the version it is running, and
+ * reloads itself when the folder is ahead - so an update needs no polling, no alarm permission
+ * and nobody at chrome://extensions. Left off when the folder holds nothing readable: a missing
+ * header is "nothing to move to", where a made-up version would be a reload into nothing.
+ */
+const extHeaders = () => (extDir.version ? { 'x-cc-ext-latest': extDir.version } : {});
+
 function send(res, code, type, body, headers = {}) {
   res.writeHead(code, {
     'content-type': type,
     'content-length': Buffer.byteLength(body),
     'cache-control': 'no-store',
+    ...extHeaders(),
     ...headers,
   });
   res.end(body);
@@ -153,7 +184,23 @@ const EXTENSION_ID = /^[a-p]{32}$/;
 /** When an extension last reached this daemon, and which one - see `noteExtension`. */
 let extensionSeenAt = 0;
 let extensionId = '';
+/** The version the last one said it runs, '' for one too old to say. See `noteExtension`. */
+let extensionVersion = '';
 let extensionSavedAt = 0;
+/**
+ * Every extension id seen lately, id -> `{ version, seenAt }`.
+ *
+ * Normally one. Two means two copies of the extension are loaded in Chrome - the one from a zip
+ * install someone never removed, beside the one from the folder that updates itself - and every
+ * page then gets two buttons and two overlays fighting over it. Only /connect can say so, and only
+ * if the daemon remembers more than the last id.
+ */
+const extensions = new Map();
+/** How long a sighting counts towards "loaded now". The same window format.mjs calls fresh. */
+const EXTENSION_RECENT_MS = 10 * 60 * 1000;
+const recentExtensions = (now = Date.now()) => [...extensions.entries()]
+  .filter(([, e]) => now - e.seenAt < EXTENSION_RECENT_MS)
+  .map(([id, e]) => ({ id, version: e.version || null, seenAt: e.seenAt }));
 /** How stale the saved sighting may be before another request writes it out. See `noteExtension`. */
 const EXTENSION_SAVE_MS = 60 * 1000;
 
@@ -175,8 +222,14 @@ function noteExtension(req) {
   const id = req.headers['x-cc-ext'];
   if (typeof id !== 'string' || !EXTENSION_ID.test(id) || !isExtension(req.headers.origin)) return;
   extensionSeenAt = Date.now();
-  const fresh = id !== extensionId;
+  // What it says it runs. An extension from before self-update sends nothing, and that absence
+  // is itself the news: it is a copy that will never update, and /connect says to remove it.
+  const said = req.headers['x-cc-ext-version'];
+  const version = typeof said === 'string' && SEMVER.test(said) ? said : '';
+  const fresh = id !== extensionId || version !== extensionVersion || !extensions.has(id);
   extensionId = id;
+  extensionVersion = version;
+  extensions.set(id, { version, seenAt: extensionSeenAt });
   // Lazily persisted. /resolve runs on every page load, and a state write per page load would be
   // the most frequent disk write this daemon makes - for a value nothing reads more than once a
   // command. Written when the id changes (a reinstall mints a new one), and otherwise at most
@@ -227,7 +280,8 @@ function readBody(req) {
 function saveState() {
   try {
     writeFileAtomic(STATE_FILE, JSON.stringify({
-      seq, primaryKey, extensionSeenAt, extensionId,
+      seq, primaryKey, extensionSeenAt, extensionId, extensionVersion,
+      extensions: recentExtensions(),
       previews: [...previews.entries()], counters: store.counters(),
       detached: [...detached.entries()],
     }));
@@ -253,6 +307,11 @@ function loadState() {
   // existing because this process was restarted, and a restart must not report it as NOT SEEN.
   extensionSeenAt = Number(raw.extensionSeenAt) || 0;
   extensionId = EXTENSION_ID.test(String(raw.extensionId || '')) ? raw.extensionId : '';
+  extensionVersion = SEMVER.test(String(raw.extensionVersion || '')) ? raw.extensionVersion : '';
+  for (const e of Array.isArray(raw.extensions) ? raw.extensions : []) {
+    if (!EXTENSION_ID.test(String(e?.id || '')) || !Number(e.seenAt)) continue;
+    extensions.set(e.id, { version: SEMVER.test(String(e.version || '')) ? e.version : '', seenAt: Number(e.seenAt) });
+  }
   // Only the sessions still alive: an ended one has nothing left to opt out of, and its pid may
   // already belong to someone else.
   for (const [key, pid] of Array.isArray(raw.detached) ? raw.detached : []) {
@@ -598,13 +657,24 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/health') {
       // Anyone may learn the bridge is up; only a caller holding the token learns what is in it.
-      if (!hasToken(req)) return json(res, 200, { ok: true, instance: INSTANCE });
+      // The version is public: a /connect whose token was refused can still tell a newer daemon.
+      if (!hasToken(req)) return json(res, 200, { ok: true, instance: INSTANCE, version: VERSION });
       pruneSessions();
       return json(res, 200, {
         ok: true, pid: process.pid, origin: ORIGIN, instance: INSTANCE, root: ROOT, build: BUILD,
+        version: VERSION, protocol: PROTOCOL,
         primary: primaryKey, slack: slack.status(),
         // Null for never, which is what every command turns into "install the extension".
-        extension: extensionSeenAt ? { seenAt: extensionSeenAt, id: extensionId } : null,
+        extension: extensionSeenAt
+          ? { seenAt: extensionSeenAt, id: extensionId, version: extensionVersion || null }
+          : null,
+        extensionVersion: extensionVersion || null,
+        extensions: recentExtensions(),
+        extDir: {
+          path: extDir.path, version: extDir.version,
+          ...(extDir.sync?.error ? { error: extDir.sync.error } : {}),
+          sync: extDir.sync,
+        },
         sessions: [...sessions.values()].map((s) => ({
           ...s, clients: clients.get(s.key)?.size || 0, detached: detached.has(s.key),
         })),
@@ -1073,6 +1143,7 @@ const server = http.createServer(async (req, res) => {
       if (!SESSION_KEY.test(key)) return json(res, 400, { error: 'session required' });
       res.writeHead(200, {
         'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive',
+        ...extHeaders(),
       });
       // Sleep, a VPN flip or a dropped Wi-Fi link can leave this socket half-open: nothing
       // errors, nothing closes, and the stream is silently dead. TCP keepalive is the layer
@@ -1122,6 +1193,8 @@ function writeToken() {
 
 const housekeeping = setInterval(() => {
   pruneSessions();
+  // Someone may have emptied or replaced the folder by hand; the header should say what is there.
+  readExtDir();
   // A temp-directory cleaner can take the token file out from under a long-lived daemon.
   if (readToken() !== TOKEN) writeToken();
   if (sessions.size === 0 && Date.now() - lastActivity > IDLE_EXIT_MS) shutdown('idle');
@@ -1184,7 +1257,25 @@ server.listen(PORT, HOST, () => {
   // Only once the port is ours: a daemon that lost the race must not overwrite the winner's token.
   writeToken();
   if (process.env.LOCAL_ARTIFACT_FOREGROUND) console.log(`bridge listening on ${ORIGIN}`);
+  /**
+   * The extension folder, brought up to this copy of the plugin - here, and only here, because
+   * the daemon that holds the port is the one process of its kind on the machine: one writer, so
+   * two sessions starting at once never copy over each other. Before this, the header says what
+   * the folder held; after it, what it holds now. Synchronous and a few hundred kilobytes: the
+   * requests that queue behind it wait milliseconds.
+   */
+  try {
+    extDir.sync = syncExtension();
+  } catch (e) {
+    extDir.sync = { synced: false, reason: 'the sync failed', error: e.message };
+  }
+  readExtDir();
+  if (extDir.sync.error) console.error(`extension folder: ${extDir.sync.reason}: ${extDir.sync.error}`);
+  else if (process.env.LOCAL_ARTIFACT_FOREGROUND) {
+    console.log(`extension folder ${EXT_DIR}: ${extDir.sync.synced ? 'synced' : 'kept'} (${extDir.sync.reason})`);
+  }
 });
+readExtDir();
 server.on('error', (e) => {
   // Another session already owns the daemon; that is the expected race, not a failure.
   if (e.code === 'EADDRINUSE') process.exit(0);

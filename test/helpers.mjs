@@ -106,15 +106,27 @@ export async function connect(bridge, key) {
  */
 export const EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 
+/** The version the extension in this checkout says it runs - what its `x-cc-ext-version` carries. */
+export const EXTENSION_VERSION = JSON.parse(
+  fs.readFileSync(path.join(ROOT, 'extension', 'manifest.json'), 'utf8'),
+).version;
+
 /**
  * The extension saying it is there, which is what every request from its service worker does:
  * `x-cc-ext` beside a chrome-extension Origin. Anything that then reports status - /health, and
  * through it scripts/connect.mjs, scripts/ctl.mjs and scripts/open.mjs - says the extension is
  * installed only once this has happened.
+ *
+ * With the version the current extension sends beside it, unless `version` says otherwise: null
+ * plays a copy from before self-update, which sends none.
  */
-export async function seenExtension(bridge, id = EXTENSION_ID) {
+export async function seenExtension(bridge, id = EXTENSION_ID, { version = EXTENSION_VERSION } = {}) {
   const res = await bridge.request('/health', {
-    token: null, headers: { origin: `chrome-extension://${id}`, 'x-cc-ext': id },
+    token: null,
+    headers: {
+      origin: `chrome-extension://${id}`, 'x-cc-ext': id,
+      ...(version ? { 'x-cc-ext-version': version } : {}),
+    },
   });
   assert.equal(res.status, 200);
   return id;

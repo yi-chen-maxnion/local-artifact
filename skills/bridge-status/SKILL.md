@@ -18,10 +18,15 @@ names another session, running `/connect` here takes it over. `not this session 
 means this session ran `/disconnect` and will not be handed the browser by anything but its own
 `/connect`. `/disconnect --stop` is how the bridge itself is stopped.
 The `extension` line says whether anything can put the comment button on a page at all. Relay it
-whenever it is not `seen`: `NOT SEEN` means the Chrome extension has never reached the bridge, so
-no page carries the button and nothing can be sent - tell the user to install it from the path the
-line prints. `last seen … ago` means one reached it once: open a page in Chrome, and reload the
-extension at `chrome://extensions` if no button appears.
+whenever it is not a plain `seen … ago`: `NOT SEEN` means the Chrome extension has never reached
+the bridge, so no page carries the button and nothing can be sent - tell the user to install it
+from the folder the line prints (Load unpacked, with Developer mode on and left on; `/connect`
+also puts that path on the clipboard). `last seen … ago` means one reached it once: open a page
+in Chrome, and reload the extension at `chrome://extensions` if no button appears.
+`extension X, plugin Y - it updates itself` means an update is on its way into the browser and
+needs nothing from anyone. `an old copy that cannot update itself` and a `WARNING … an older copy
+of the extension is also loaded` line both mean the zip-installed extension is still in Chrome:
+remove it at `chrome://extensions`, keeping (or loading) the one from the folder the line names.
 The `origins` and `previews` lists are ids for pins and comment numbers, one per origin and one
 per file Claude has opened. They belong to no session and outlive the ones that used them.
 If `monitor` says NOT registered, the plugin monitor never armed — the session needs a restart,

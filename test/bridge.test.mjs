@@ -33,7 +33,9 @@ describe('bridge', () => {
 
     test('/health says only that it is up without the token', async () => {
       const bare = await (await bridge.request('/health', { token: null })).json();
-      assert.deepEqual(Object.keys(bare).sort(), ['instance', 'ok']);
+      // The version is the one thing added: a /connect from an older copy of the plugin needs it
+      // to leave a newer daemon alone, and it is no secret which release is installed.
+      assert.deepEqual(Object.keys(bare).sort(), ['instance', 'ok', 'version']);
       const full = await (await bridge.request('/health')).json();
       assert.ok(full.sessions.some((s) => s.key === key));
     });
@@ -788,8 +790,20 @@ describe('an origin, as the browser passes between sessions', () => {
 describe('scripts/connect.mjs', () => {
   const SCRIPT = path.join(ROOT, 'scripts', 'connect.mjs');
   let bridge;
+  /**
+   * A `pbcopy` of our own, first on PATH, that writes what it was given to a file. The script puts
+   * the extension folder on the clipboard when there is no extension, and a test run must neither
+   * overwrite the real clipboard of whoever runs it nor go unchecked.
+   */
+  let clip;
+  let bin;
 
-  before(async () => { bridge = await startBridge(); });
+  before(async () => {
+    bridge = await startBridge();
+    bin = fs.mkdtempSync(path.join(bridge.dir, 'bin-'));
+    clip = path.join(bin, 'clipboard');
+    fs.writeFileSync(path.join(bin, 'pbcopy'), `#!/bin/sh\ncat > '${clip}'\n`, { mode: 0o755 });
+  });
   after(() => bridge.stop());
 
   /**
@@ -799,7 +813,10 @@ describe('scripts/connect.mjs', () => {
    */
   const run = (exe, args, port, { monitor = false } = {}) => new Promise((resolve, reject) => {
     const child = spawn(exe, args, {
-      env: { ...process.env, LOCAL_ARTIFACT_PORT: String(port), TMPDIR: bridge.dir },
+      env: {
+        ...process.env, LOCAL_ARTIFACT_PORT: String(port), TMPDIR: bridge.dir,
+        PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';
@@ -838,6 +855,12 @@ describe('scripts/connect.mjs', () => {
     assert.match(out, /\n {2}monitor listening\n$/); // the line the slash command reads back
     const install = /^extension {2}NOT SEEN - install it: chrome:\/\/extensions -> Developer mode -> Load unpacked -> \S+\/extension$/m;
     assert.match(out, install);
+    // The folder is the daemon's - its config directory, not the plugin's own extension/, which
+    // moves with every update - and it is on the clipboard, for the picker's Cmd+Shift+G.
+    const folder = path.join(bridge.configDir, 'extension');
+    assert.ok(out.includes(`Load unpacked -> ${folder}\n`), out);
+    assert.equal(fs.readFileSync(clip, 'utf8'), folder);
+    assert.match(out, /that folder is on the clipboard: in the Load unpacked picker press\n.*Cmd\+Shift\+G, then Cmd\+V/);
     const said = err.trim().split('\n');
     // The port the test suite runs on is not the port the extension speaks to, and a run that
     // said nothing about that would have someone debugging the extension instead.
@@ -851,7 +874,11 @@ describe('scripts/connect.mjs', () => {
 
   test('claims the browser for its session and says the monitor is listening', async () => {
     await seenExtension(bridge);
+    fs.rmSync(clip, { force: true });
     const { code, out, err, pid } = await run(named(), [SCRIPT], bridge.port, { monitor: true });
+    // An extension that is there needs no folder, and the clipboard is the user's to keep.
+    assert.equal(fs.existsSync(clip), false);
+    assert.doesNotMatch(out, /clipboard/);
     assert.equal(code, 0);
     // The port warning and nothing else: with an extension in the browser there is no failure.
     assert.match(err.trim(), /^WARNING {2}LOCAL_ARTIFACT_PORT=/);

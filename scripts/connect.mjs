@@ -6,8 +6,9 @@
  * comment button; all it needs is to know whose session that page reports to, which is what the
  * claim here says. This is also the only place the bridge daemon gets started.
  */
-import { PORT, ROOT, bridge, ensureDaemon, health, resolveSession, sleep } from '../lib/common.mjs';
-import { extensionLine } from '../lib/format.mjs';
+import { execFileSync } from 'node:child_process';
+import { EXT_DIR, PORT, bridge, ensureDaemon, health, resolveSession, sleep } from '../lib/common.mjs';
+import { extensionStatus } from '../lib/format.mjs';
 
 // Refused rather than ignored, and before anything is started: someone naming a file here is
 // asking for it to be opened, and would otherwise be told only that setup succeeded.
@@ -37,7 +38,7 @@ if (PORT !== 4517) {
 }
 
 try {
-  await ensureDaemon();
+  const { note } = await ensureDaemon();
   await bridge('/register', { body: { key: session.key, pid: session.pid, cwd: session.cwd, repo: session.repo } });
   // The claim takes no origin, so every origin nobody opened explicitly falls to this session -
   // which is what "any page you open" means.
@@ -55,8 +56,16 @@ try {
   }
 
   // What the bridge knows about the extension, in the same words `ctl.mjs status` uses.
-  const extension = extensionLine(h?.extension, ROOT);
+  const extension = extensionStatus(h, EXT_DIR);
   const seen = Boolean(h?.extension?.seenAt);
+  /**
+   * The folder to install from, on the clipboard - only when there is something to install. The
+   * path sits under a hidden directory, which Chrome's Load unpacked picker will not show, and
+   * which the person would otherwise type by hand; Cmd+Shift+G in the picker opens a box that
+   * takes a pasted path. Never when the extension is there: the clipboard is the user's, and a
+   * command that overwrote it for nothing would be a command that loses what they had copied.
+   */
+  const copied = !seen && copyToClipboard(h?.extDir?.path || EXT_DIR);
 
   console.log(`connect  session ${session.key}${session.repo ? ` (${session.repo})` : ''}`);
   // The other session is never told, and its user is about to stop receiving the comments they
@@ -66,6 +75,12 @@ try {
   console.log('          carries the comment button and reports back here. The extension is');
   console.log('          what puts it there, so install it if no button ever appears.');
   console.log(extension);
+  if (copied) {
+    console.log('           that folder is on the clipboard: in the Load unpacked picker press');
+    console.log('           Cmd+Shift+G, then Cmd+V, then Return');
+  }
+  // An old session meeting a newer bridge: it keeps it, and says the session is the old thing.
+  if (note) console.log(`  ${note}`);
   // Last, because this is the line the slash command reads back to the user.
   console.log(`  monitor ${monitorUp ? 'listening' : 'NOT ATTACHED - comments will not reach this session'}`);
   if (!monitorUp) {
@@ -87,4 +102,14 @@ try {
 } catch (e) {
   console.error(`connect: ${e.message}`);
   process.exit(1);
+}
+
+/** macOS's clipboard. False, and nothing said, where there is no `pbcopy` or it fails. */
+function copyToClipboard(text) {
+  try {
+    execFileSync('pbcopy', { input: text, stdio: ['pipe', 'ignore', 'ignore'], timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
 }

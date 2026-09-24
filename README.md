@@ -18,21 +18,33 @@ Why it behaves the way it does — and what was tried before — is in
 
 ## Install
 
-Two halves, and **both are needed**: the plugin in Claude Code, and the Chrome extension.
+Two halves, and **both are needed**: the plugin in Claude Code, and the Chrome extension. Both
+update themselves from then on. (A step-by-step version in Chinese, for people who do not write
+code, is [`INSTALL.md`](INSTALL.md).)
 
 ```bash
-claude plugin marketplace add <path-to-this-repo>
+claude plugin marketplace add yi-chen-maxnion/local-artifact
 claude plugin install local-artifact@local-artifact
 ```
 
-Then **restart the session** — the monitor that receives comments is armed at session start.
-After updating the plugin, restart open sessions too: a monitor started from older code cannot
-authenticate to the new bridge.
+Then turn on **auto-update**, which Claude Code leaves off for a third-party marketplace:
+`/plugin` → Marketplaces → local-artifact → Enable auto-update. New versions are then fetched in
+the background and loaded at the next session start. **Restart the session** after installing —
+the monitor that receives comments is armed at session start.
 
 ### The Chrome extension — required
 
-1. `chrome://extensions` → enable **Developer mode**
-2. **Load unpacked** → select the `extension/` directory of this repo
+1. Run `/connect` once. With no extension yet it prints the folder to load it from —
+   `~/.config/local-artifact/extension` — and puts that path on the clipboard.
+2. `chrome://extensions` → turn on **Developer mode**, and leave it on: turning it off disables
+   every unpacked extension.
+3. **Load unpacked** → in the picker press Cmd+Shift+G, Cmd+V, Return (the folder is under a
+   hidden directory the picker does not show).
+
+That folder is the plugin's, not a copy you manage: the bridge brings it up to date whenever a
+newer plugin starts it, and the extension notices and reloads itself — see
+[Releases and updates](#releases-and-updates). Load it from there rather than from a plugin
+directory, whose path changes with every version.
 
 The extension is what puts the button on a page — every page, the ones the bridge serves
 included. There is no second way in: the bridge injects nothing into the files it serves, and no
@@ -50,8 +62,9 @@ only a toolbar click grants), and the overlay is meant to reach a deployed build
 localhost. Nothing is injected into a page unless a Claude session is connected and the bridge
 answers for that origin, and the toolbar menu turns any origin off for good.
 
-Reload it from `chrome://extensions` after editing anything in `extension/`, then refresh the
-pages you had open.
+Updates need nothing from you: the extension reloads itself into a newer version on the bridge's
+next answer, rebinds the pages you have open, and waits if you are in the middle of writing a
+comment (the toolbar badge says `UP` meanwhile).
 
 **The extension talks to `http://127.0.0.1:4517` and nothing else**, as a literal it cannot read
 an environment variable out of. `LOCAL_ARTIFACT_PORT` moves the daemon and exists for the test
@@ -282,6 +295,13 @@ any page in Chrome                 bridge daemon 127.0.0.1:4517        claude se
   one under "The Chrome extension" above, and the command exits `3`.
 - **`/connect` says `extension  last seen … ago`.** One reached the bridge once, but not recently:
   open a page in Chrome, and if no button appears, reload the extension at `chrome://extensions`.
+- **`/connect` says `an old copy that cannot update itself`, or warns that `an older copy of the
+  extension is also loaded`.** The extension from a zip install is still in Chrome - it sends no
+  version, and two copies put two overlays on every page. Remove it at `chrome://extensions` and
+  keep (or load) the one from `~/.config/local-artifact/extension`, then refresh open pages once.
+- **`/connect` says `bridge X is running from a newer copy of the plugin`.** Another session has
+  already started the updated bridge, and this one kept it rather than downgrade it. Everything
+  works; restart this session to be on the new version too.
 - **`/connect` says the monitor is NOT ATTACHED.** The monitor did not arm: restart the session,
   and check that the `when` trigger in `monitors/monitors.json` is
   `on-skill-invoke:local-artifact:connect`.
@@ -316,52 +336,56 @@ seen, and whether this session's monitor is connected.
 monitors/         the auto-armed monitor declaration
 lib/              common.mjs (session key, ports, token, bridge client), format.mjs (notification text)
 bridge/           server, static serving, markdown/text/image wrapper, scratch store, slack.mjs
-scripts/          monitor.mjs (session side), connect.mjs, disconnect.mjs, open.mjs (Claude opens a file), ctl.mjs
+scripts/          monitor.mjs (session side), connect.mjs, disconnect.mjs, open.mjs (Claude opens a file), ctl.mjs,
+                  release.mjs (npm run release), check.mjs (npm run check)
 slack-app.json    the client id of the Slack app comments are posted through (not a secret)
 extension/        MV3 extension: service worker, overlay.js, console-hook.js, popup (toolbar menu)
 skills/           what Claude does with a comment (ui-comments), how it opens a file (show-file), and checks the bridge (bridge-status)
 commands/         /connect, /disconnect, /slack
 fixtures/         pages for checking the overlay by hand
 test/             node --test suites: bridge routes, open.mjs's refusals, notification format,
-                  overlay anchoring, and plugin.test.mjs for the monitor trigger
+                  overlay anchoring, plugin.test.mjs for the monitor trigger, update.test.mjs
+                  (versions, folder sync, ensureDaemon), contract.test.mjs (add-only routes), release
+.github/          ci.yml: tests on every push; main must be a tagged release
 docs/             DESIGN.md
 ```
 
-## Moving it to another machine
+## Releases and updates
 
-There is no `claude plugin pack`. A plugin is distributed through a **marketplace**, and this
-repo is its own single-entry marketplace (`.claude-plugin/marketplace.json`), so it is already
-in a shippable shape. `claude plugin validate .` confirms it.
+Everything about how a new version reaches people, and why, is in
+[docs/DESIGN.md](docs/DESIGN.md#updates). In short:
 
-**Via git (recommended).** Push this repo anywhere you can clone from, then on the new machine:
-
-```bash
-claude plugin marketplace add <owner>/<repo>          # GitHub shorthand, or a full git URL
-claude plugin install local-artifact@local-artifact
-```
-
-Private repos work — `marketplace add` uses your existing git/`gh` credentials.
-
-**Via a copied directory** (no git, e.g. an AirDrop or a USB stick):
+**Publishing.** `main` is releases only: a new install takes main's HEAD, and Claude Code updates
+an installed plugin only when `version` in `.claude-plugin/plugin.json` changes. Work happens on
+`dev`. To publish what is on dev:
 
 ```bash
-claude plugin marketplace add /path/to/local-artifact-plugin
-claude plugin install local-artifact@local-artifact
+npm run release 0.2.1 --dry-run   # prints every step, changes nothing
+npm run release 0.2.1
 ```
 
-**Via a zip** — marketplace entries also accept an `archive` source: an HTTPS URL to a zip plus
-its `sha256`, verified on every download. Useful for an internal file server with no git.
+On a clean `dev`, with a version strictly greater than the current one, it runs `npm test` and
+`npm run check`, bumps the version in plugin.json, `extension/manifest.json`, `BUILD` in
+`extension/background.js`, package.json and package-lock.json, commits `release v0.2.1`,
+fast-forwards main to it, tags `v0.2.1`, and pushes main, dev and the tag in one atomic push. CI
+(`.github/workflows/ci.yml`) runs the tests on every push and pull request, and fails a main whose
+HEAD is not a tagged release with agreeing versions.
 
-Whichever route, two things do **not** travel with the plugin and are needed on the new machine:
+**How users get it.** With auto-update on, Claude Code fetches the new version and loads it at the
+next session start. The first `/connect` after that replaces the bridge daemon (a session still on
+the old copy leaves a newer daemon alone rather than downgrade it, and says to restart). The new
+daemon copies its extension into `~/.config/local-artifact/extension` - only ever forwards - and
+every response it sends carries the version now in that folder, so the extension reloads itself
+into it within a page load or two, without anyone opening chrome://extensions.
 
-- **Node 20+** on `PATH` — the bridge and monitor are plain Node scripts with no dependencies.
-- **The Chrome extension**, loaded unpacked from the cloned repo's `extension/`. Extensions are
-  per-browser-profile; installing the plugin does not install it, and without it nothing at all
-  happens in the browser.
+**The extension folder.** `~/.config/local-artifact/extension` (`$LOCAL_ARTIFACT_CONFIG_DIR/extension`
+when that is set) is loaded unpacked once and stays where it is. Nothing but the daemon writes to
+it; editing it by hand is undone at the next update. `ctl.mjs status` and `/connect` print which
+version is there and which one the browser is running.
 
-Nothing else is machine-specific: the port, the scratch directory and the session key are all
-derived at runtime. `/slack login` opens its browser page with macOS `open`. `claude plugin tag`
-can cut a `local-artifact--v0.1.0` git tag when you want versioned releases.
+Other ways to install - a copied directory, a zip (a marketplace `archive` source with its
+`sha256`) - still work for the plugin, but they do not update themselves; the extension folder
+does not care which one filled it. Node 20+ on `PATH` is the one thing no install brings with it.
 
 ## Developing this plugin
 
@@ -370,6 +394,17 @@ resolves to the repo itself — verify with `ps` on the running monitor — so s
 `bridge/`, `scripts/` and `lib/` take effect with no reinstall. A cache copy exists but is not
 what runs. Installed from **git, a zip or a copied directory** on another machine, the plugin does
 run from `~/.claude/plugins/cache/…` and edits there need a reinstall.
+
+Work on `dev`; `main` only ever moves by `npm run release` (see above).
+
+**The extension, while developing.** Load it from `~/.config/local-artifact/extension` like
+everyone else, not from this repo's `extension/`, so the update path is the one being exercised.
+An edit to `extension/` reaches that folder without a version bump because this checkout has a
+`.git`: the next `/connect` sees a changed build and replaces the daemon, and the new daemon syncs
+the folder when the contents differ at the same version (`LOCAL_ARTIFACT_DEV=1` does the same for a
+checkout without `.git`; an installed release never does). The extension reloads itself only for a
+strictly higher version, so after a same-version edit reload it once at `chrome://extensions` - the
+pages you have open are rebound without a refresh.
 
 What still needs a restart either way: `monitors/monitors.json`, `plugin.json`, and skill or
 command frontmatter — those are read when the session starts.
@@ -405,8 +440,9 @@ region code is being tested on. A shim there is a lie the test would then be bui
 the file with none.
 
 `node_modules/` is git-ignored, and nothing the plugin does at runtime reads it: `codeBuild()` in
-`lib/common.mjs` fingerprints only the `.mjs` files directly inside `bridge/` and `lib/`, and the
-bridge only ever serves files out of the directory the opened file lives in.
+`lib/common.mjs` fingerprints only the `.mjs` files directly inside `bridge/` and `lib/` and the
+files directly inside `extension/`, and the bridge only ever serves files out of the directory the
+opened file lives in.
 
 Without `node_modules`, `npm test` fails — only `test/overlay.test.mjs`, and with one line saying
 to run `npm install`. That is on purpose rather than a skip: those tests are the only cover the
@@ -414,8 +450,8 @@ overlay's 2700 lines have, and a suite that quietly reports no failures on a che
 of them is the worse outcome. Every other test file still passes on a bare checkout.
 
 `extension/overlay.js` is packaged by the extension and injected from there, and is the only copy
-there is. Load the unpacked extension from **this repo's** `extension/` directory, and after
-changing it reload it in `chrome://extensions`. The pages in `fixtures/` are the manual checks:
+there is; the daemon copies it into the folder Chrome loads, as described above. The pages in
+`fixtures/` are the manual checks:
 `interactive.html` (the freeze), `scrolling-pane.html` and `late-render.html` (anchors),
 `hostile.html` (page scripts cannot send comments), `strict-csp.html` (injection under a strict CSP),
 `comment-list.html` (the list, anchors that disappear and come back, hover while scrolling), and

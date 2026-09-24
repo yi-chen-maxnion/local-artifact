@@ -752,10 +752,14 @@ before and after the capture; if not, there is no screenshot, and the notificati
 was not the visible tab.
 
 Reloading the extension **orphans the scripts it injected into every page already open**: they
-keep running but their `chrome.runtime` link is dead. The overlay checks `chrome.runtime.id`
-before every call rather than deciding once at start-up, so an orphaned page says *the extension
-was reloaded — refresh this page* instead of timing out silently. **After reloading the extension,
-refresh any page you had open.**
+keep running but their `chrome.runtime` link is dead, and Chrome does not inject the new version
+into them. The overlay checks `chrome.runtime.id` before every call rather than deciding once at
+start-up, so an orphaned page says *the extension was reloaded — refresh this page* instead of
+timing out silently. Since the extension started updating itself (see [Updates](#updates)) a
+reload no longer leaves that to the user: the new service worker's `onInstalled` walks every open
+http(s) tab and binds it again, the new overlay replaces the dead one's host, and an orphaned
+overlay takes itself down unless it is holding a comment still being written. The one exception is
+an overlay from 0.1.0, which predates all of this and stays until its page is refreshed.
 
 ## Why targets are served through the bridge
 
@@ -1070,6 +1074,87 @@ bridge stopped on purpose comes back only when somebody runs `/connect`, so on `
 way out is not reported as a refusal either. A signal says `signal` instead, because a signal is
 also how `/connect` replaces a daemon running older code, and there the monitors should be back on
 the new one at once.
+
+## Updates
+
+Other people install the plugin from GitHub as a Claude Code marketplace and are meant to get new
+versions without doing anything. Three things have to move for that - the plugin, the daemon it
+starts, and the Chrome extension - and each one moves by its own rule.
+
+**The plugin moves only when its version does.** Claude Code compares `version` in
+`.claude-plugin/plugin.json` and updates an installed plugin when it changes, never for new commits
+alone; for a third-party marketplace it does so only once the user has turned auto-update on
+(`/plugin` -> Marketplaces), and a new version is loaded at the next session start. A new install
+takes main's HEAD. So **main holds releases and nothing else**: work happens on `dev`, and
+`npm run release x.y.z` (`scripts/release.mjs`) bumps every version source in one commit on dev,
+fast-forwards main to it, tags `vx.y.z`, and pushes main, dev and the tag in one atomic push. CI
+fails on a main whose HEAD is not tagged `v<plugin.json version>`, which is how a commit that
+reached main some other way gets noticed. Five places carry the version - plugin.json,
+`extension/manifest.json`, `BUILD` in `extension/background.js`, package.json and its lock - and
+`test/update.test.mjs` holds them equal on every commit, since each is read by a different part of
+the chain below and one left behind is an update that half happens.
+
+**The extension is loaded from a folder that does not move.** An installed plugin lives in
+`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, a path that changes with every
+version, and Claude Code removes old versions - so an extension loaded unpacked from the plugin's
+own `extension/` would be pointing at a deleted directory after the first update. The marketplace's
+own clone does stay put, but it tracks main's HEAD on its own schedule and where it lives is Claude
+Code's business, not a documented place to load anything from. So the plugin owns a folder:
+`~/.config/local-artifact/extension` (`EXT_DIR` in `lib/common.mjs`, beside the Slack token under
+`CONFIG_DIR`). The user loads it unpacked once - `/connect` prints it, and puts it on the clipboard
+when no extension has been seen, because the picker hides dotted directories and Cmd+Shift+G takes a
+pasted path - and never has to touch chrome://extensions again. Developer mode has to stay on:
+Chrome disables unpacked extensions when it is turned off.
+
+**The daemon fills that folder, and nothing else does.** Right after `listen()` succeeds the daemon
+calls `syncExtension()`: it holds the port, so it is the one process of its kind on the machine and
+the folder has one writer. The copy goes to a temp sibling, then two renames - the folder aside,
+the copy in - because macOS will not rename a directory onto one that is not empty; the old one is
+then removed. A second rename that fails puts the old folder back, so Chrome always has a whole
+extension to load, never a half-written one. Siblings left by a process that died mid-swap are
+cleaned up by the next sync, a lost folder restored from them first; siblings of a live process
+are left alone, since it may be mid-swap. The result is in `/health` as `extDir`.
+
+**Nothing downgrades.** The folder is replaced when this plugin's extension manifest is newer than
+the folder's, never when it is older - a session still running an old copy of the plugin must not
+pull the extension back from under a newer one - and at the same version only in a development
+checkout (the plugin root has a `.git`, or `LOCAL_ARTIFACT_DEV=1`) and only when the contents differ,
+by a hash of the bytes rather than the mtimes a copy resets. That last rule is how an edit to
+`extension/` reaches the browser while developing, without a version bump. The daemon is the same:
+`/health` now reports `version` (the public view too), and `ensureDaemon` keeps a daemon whose
+version is higher than its own - replacing it would downgrade the routes, the overlay and the folder
+it just synced, and the next newer session would replace it back. `/connect` says so instead: the
+session is the old thing and should be restarted. A daemon with no version predates versions and is
+replaced as before. For the same reason routes and response fields are **add-only**: a newer daemon
+serves monitors the host started from the old copy and never restarts, and an extension that has
+not reloaded yet. `test/contract.test.mjs` pins every route and field the monitor, the scripts and
+the extension read, and fails on a caller that starts using a route it does not pin.
+
+**The bridge tells the extension, on every answer.** Every response carries
+`x-cc-ext-latest: <version in the folder>` - the folder's actual `manifest.json`, read at start,
+after the sync and on housekeeping, never the plugin's version, which would have the worker
+re-reading the folder on every request for nothing. The service worker compares it with the
+`BUILD` it is running; when the folder is ahead it re-reads the folder's `manifest.json` and
+`background.js` and reloads only when both carry the new version (a sync caught halfway is "not
+yet"), with none of its own requests in flight, and with no tab holding a comment being written -
+while it waits the toolbar badge says `UP`. A guard in `chrome.storage.local` (`selfUpdate`) allows
+at most two attempts per version, ten seconds apart, and each decision is logged as
+`[local-artifact] update: checked|skipped|deferred|gave up|reloading ...`. No polling and no alarms
+permission: the header rides on requests the extension makes anyway. The popup footer shows
+`v<BUILD>`. The extension sends its own version as `x-cc-ext-version`, which the daemon records per
+extension id, so `/connect` can say `extension 0.2.0, plugin 0.2.1 - it updates itself`, and can
+spot the two cases that need a person: an extension that sends no version is a 0.1.0 zip copy, which
+has no update code and never will; and two ids heard in ten minutes are two copies loaded side by
+side, each putting an overlay on every page.
+
+What the design rests on was measured in Chrome for Testing before any of it was written: an
+unpacked MV3 extension sees new files on disk through `fetch(chrome.runtime.getURL(...))` with
+`cache: 'no-store'`, and `chrome.runtime.reload()` loads them under the same id with its storage
+kept (`onInstalled` fires with reason `update`); pages already open keep the dead overlay and are
+not re-injected, which is why the worker binds them again itself; and more than thirty reloads
+under a second apart makes Chrome terminate the extension, which is what the attempt guard is for.
+What a browser restart does with a persisted Load unpacked whose folder changed underneath it is
+the one thing not yet measured in the real Chrome.
 
 ## Slash commands
 
