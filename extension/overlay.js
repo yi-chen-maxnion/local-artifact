@@ -241,6 +241,35 @@
    * querySelector, and a selector that also matches something earlier on the page points
    * confidently at the wrong thing - so there is no fixed depth, only "unique yet?".
    */
+  /**
+   * From <body> to the element, each step the nth child of that tag. The overlay host is not a
+   * step and not a sibling: it is injected, it is not in the file, and counting it would make
+   * the chain disagree with the file the bridge parses.
+   */
+  function domChain(el) {
+    if (!el || el.nodeType !== 1 || isPage(el) || el.id === 'cc-overlay-host') return [];
+    const steps = [];
+    for (let node = el; node && node.nodeType === 1 && !isPage(node); node = node.parentElement) {
+      const parent = node.parentElement;
+      if (!parent) break;
+      const same = [...parent.children].filter((n) => n.localName === node.localName && n.id !== 'cc-overlay-host');
+      steps.unshift({ tag: node.localName, index: same.indexOf(node) });
+    }
+    return steps;
+  }
+
+  function nodeFromChain(chain) {
+    let node = document.body;
+    if (!node || !Array.isArray(chain)) return null;
+    for (const step of chain) {
+      if (!step || typeof step.index !== 'number' || typeof step.tag !== 'string') return null;
+      const kids = [...node.children].filter((el) => el.localName === step.tag && el.id !== 'cc-overlay-host');
+      node = kids[step.index];
+      if (!node) return null;
+    }
+    return node;
+  }
+
   function cssSelector(target) {
     if (!target || target.nodeType !== 1 || isPage(target)) return '';
     const parts = [];
@@ -278,6 +307,8 @@
     return {
       tag, testid: testid || undefined,
       selector: cssSelector(el),
+      chain: domChain(el),
+      id: el.id || undefined,
       // An input has no innerText - its content is the value, which is what the user sees.
       text: clean(isField ? el.value : el.innerText || el.textContent, 80) || undefined,
       placeholder: isField ? el.placeholder || undefined : undefined,
@@ -297,6 +328,8 @@
       kind: 'element',
       selector: cssSelector(el),
       path: domPath(el),
+      id: el.id || undefined,
+      chain: domChain(el),
       testid: el.getAttribute('data-testid') || el.getAttribute('data-test-id') || undefined,
       role: el.getAttribute('role') || undefined,
       label: el.getAttribute('aria-label') || el.getAttribute('title') || undefined,
@@ -1526,6 +1559,8 @@
         selectedText: text.slice(0, 2000),
         selector: holder ? cssSelector(holder) : undefined,
         path: holder ? domPath(holder) : undefined,
+        id: holder?.id || undefined,
+        chain: holder ? domChain(holder) : undefined,
         testid: holder?.getAttribute?.('data-testid') || undefined,
         html: holder ? holder.cloneNode(false).outerHTML : undefined,
         rect: rectOf(r),
@@ -2001,7 +2036,7 @@
       // answer which is not prose. Carried onto the error so the catch can read it instead of
       // matching on a sentence the worker is free to reword.
       if (j.error) throw Object.assign(new Error(j.error), { code: j.code, status: j.status });
-      addPin(j.n, comment, anchor, loc);
+      addPin(j.n, comment, anchor, loc, j.source);
       // Sending is not "I am done" - a review pass is several comments in a row.
       //
       // With a frame taken at Send, closed while the overlay is still invisible, so it is not put
@@ -2340,9 +2375,13 @@
    * admits it is lost. The comment is still counted and still in the list, marked as lost: it was
    * left here, it just cannot be pointed at right now.
    */
-  function addPin(n, comment, anchor, loc) {
+  function addPin(n, comment, anchor, loc, source) {
     // The locator the outline was already following, so the pin starts with its node in hand.
+    // `source` is how a pin on a served HTML file is found again after that file is edited.
+    // Absent — any other page, or a node the file could not be tied to — and the pin is only
+    // its selector, which is what it always was.
     const pin = { ...loc, n, comment, label: labelFor(anchor), ts: Date.now(), page: pageKey() };
+    if (source && typeof source === 'object') pin.source = source;
     pins.push(pin);
     state.fresh = pin; // so this one, and only this one, gets an entrance
     savePins();
@@ -2363,6 +2402,48 @@
     try { return JSON.parse(localStorage.getItem(PIN_KEY) || '[]'); } catch { return []; }
   };
   let pins = loadPins();
+
+  /**
+   * A served HTML file was edited out from under the selector. Adopt the bridge's chain only
+   * when it names a node that is on screen and agrees about tag, id and testid. A chain the
+   * current DOM does not contain — the tab is still the pre-edit file — is not written, so the
+   * selector keeps describing what is actually showing.
+   */
+  function adoptReanchor(pin, result) {
+    if (!result || result.same || result.lost || result.skipped || !Array.isArray(result.chain)) return false;
+    const node = nodeFromChain(result.chain);
+    if (!node) return false;
+    if (result.tag && node.localName !== result.tag) return false;
+    if (result.id && node.id !== result.id) return false;
+    if (result.testid && node.getAttribute('data-testid') !== result.testid) return false;
+    const sel = cssSelector(node);
+    if (!sel) return false;
+    if (pin.kind === 'region' && pin.ref) pin.ref = { ...pin.ref, selector: sel };
+    else pin.selector = sel;
+    if (result.source && typeof result.source === 'object') pin.source = result.source;
+    pin._el = pin._ref = pin._holder = pin._range = null;
+    pin._miss = false;
+    return true;
+  }
+
+  let reanchorPromise = Promise.resolve();
+  async function reanchorPins() {
+    if (location.origin !== cfg.origin || !location.pathname.startsWith('/p/')) return;
+    const here = pageKey();
+    const mine = pins.filter((p) => p.page === here && p.source);
+    if (!mine.length) return;
+    const j = await askExtension('reanchor', {
+      previewId: cfg.previewId,
+      pins: mine.map((p) => ({ n: p.n, source: p.source })),
+    }, 3000);
+    if (!j || j.error || !Array.isArray(j.pins)) return;
+    let changed = false;
+    for (const result of j.pins) {
+      const pin = pins.find((p) => p.n === result.n && p.page === here);
+      if (pin && adoptReanchor(pin, result)) changed = true;
+    }
+    if (changed) savePins();
+  }
 
   /** The quoted text, found again inside the element that held it, across node boundaries. */
   function findQuote(container, needle) {
@@ -2677,8 +2758,21 @@
     domWatch.observe(document.documentElement, { childList: true, subtree: true });
   }
 
-  renderPins();
-  watchDom();
+  // On a served file, pins that carry a source anchor are placed after /reanchor answers, so a
+  // selector the edit broke is not drawn as lost for the moment it takes to follow the node.
+  // Everywhere else there is nothing to ask, and the pins draw as they always have.
+  const reanchorFirst = location.origin === cfg.origin
+    && location.pathname.startsWith('/p/')
+    && pins.some((p) => p.page === pageKey() && p.source);
+  if (!reanchorFirst) {
+    renderPins();
+    watchDom();
+  }
+  reanchorPromise = reanchorPins().finally(() => {
+    if (!reanchorFirst) return;
+    renderPins();
+    watchDom();
+  });
 
   let frame = 0;
   const onViewportChange = () => {
@@ -2761,8 +2855,10 @@
    */
   if (typeof window.__ccTest === 'function') {
     window.__ccTest({
-      askExtension, brief, cssSelector, describe, distinctClass, domPath,
+      askExtension, brief, cssSelector, describe, distinctClass, domPath, domChain, nodeFromChain,
       elementsInRegion, findQuote, pageKey, selectorStep, unique,
+      openList: () => setList(true),
+      reanchorNow: () => reanchorPromise,
     });
   }
 })();

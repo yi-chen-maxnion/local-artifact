@@ -52,8 +52,14 @@ const SOURCE = fs.readFileSync(OVERLAY_SRC, 'utf8');
  * `requests` either way, so a test can also assert on what was asked while nothing answers. The
  * fake is returned as `chrome`, so a test can also take the extension away mid-flight.
  */
-export async function overlayWindow({ url = 'http://localhost:5173/page?q=1#/route', sendMessage = null } = {}) {
-  const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+export async function overlayWindow({
+  url = 'http://localhost:5173/page?q=1#/route',
+  sendMessage = null,
+  config = null,
+  storage = null,
+  html = '<!doctype html><html><body></body></html>',
+} = {}) {
+  const dom = new JSDOM(html, {
     url,
     runScripts: 'dangerously',
     // Gives the window requestAnimationFrame, which the overlay wants at start-up.
@@ -89,7 +95,11 @@ export async function overlayWindow({ url = 'http://localhost:5173/page?q=1#/rou
   // without it the overlay draws nothing at all.
   window.__ccConfig = {
     previewId: 'abcdef1234', origin: 'http://127.0.0.1:4317', repo: 'repo', slack: null,
+    ...config,
   };
+  if (storage) {
+    for (const [key, value] of Object.entries(storage)) window.localStorage.setItem(key, value);
+  }
 
   /**
    * The overlay's UI lives in a CLOSED shadow root, so `host.shadowRoot` is null - that is the

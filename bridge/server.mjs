@@ -2,9 +2,10 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  HOST, PORT, ORIGIN, PING_MS, ROOT, SESSION_KEY, STATE_FILE, TOKEN_FILE,
+  HOST, PORT, ORIGIN, PING_MS, ROOT, SESSION_KEY, STATE_DIR, STATE_FILE, TOKEN_FILE,
   codeBuild, pidAlive, rateLimiter, readToken, shortId, writeFileAtomic,
 } from '../lib/common.mjs';
+import { captureSource, fileHash, relocator } from '../lib/reanchor.mjs';
 import { Store, decodeShot } from './store.mjs';
 import { contentType, decodeSegments, isFile, kindOf, readIfFile, safeJoin } from './serve.mjs';
 import { gonePage, slackPage, wrapperPage } from './wrapper.mjs';
@@ -269,6 +270,96 @@ function pageKey(u) {
     const x = new URL(u);
     return x.pathname + x.search;
   } catch { return ''; }
+}
+
+/**
+ * The file bytes a pin was captured against. Tree matching needs the version a pin's source was
+ * taken from when the element itself was rewritten; quote matching does not, that evidence rides
+ * on the pin.
+ *
+ * One file per version, named by its hash. A pin that moved carries a source for the version it
+ * moved onto, so the next edit is matched from there - one snapshot per preview, the latest
+ * comment's, left every pin that had already moved once with nothing to match from, and a second
+ * comment overwrote the first one's. The name is only a lookup: the content is hashed again on
+ * read, and a file that does not hash to what the pin says is not that version.
+ *
+ * Keyed by the preview id, which is the hex `shortId` mints, and the hex hash, so neither can
+ * be a path.
+ */
+const SNAPS_KEPT = 8;
+
+function snapPrefix(previewId) {
+  if (!/^[a-f0-9]{8,32}$/i.test(previewId || '')) return null;
+  return `snap-${PORT}-${previewId}-`;
+}
+
+function snapPath(previewId, hash) {
+  const prefix = snapPrefix(previewId);
+  if (!prefix || !/^[a-f0-9]{64}$/.test(hash || '')) return null;
+  return path.join(STATE_DIR, `${prefix}${hash.slice(0, 16)}`);
+}
+
+/** Marks a snapshot as used, so pruning keeps the versions pins still point at. */
+function touchSnap(file) {
+  const now = new Date();
+  try { fs.utimesSync(file, now, now); } catch {}
+}
+
+/** Only the newest few versions of a preview. A pin older than all of them matches by quote alone. */
+function pruneSnaps(previewId) {
+  const prefix = snapPrefix(previewId);
+  if (!prefix) return;
+  try {
+    const mine = fs.readdirSync(STATE_DIR)
+      .filter((name) => name.startsWith(prefix) && !name.endsWith('.tmp'))
+      .map((name) => {
+        const file = path.join(STATE_DIR, name);
+        try { return { file, t: fs.statSync(file).mtimeMs }; } catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.t - a.t);
+    for (const { file } of mine.slice(SNAPS_KEPT)) fs.rmSync(file, { force: true });
+  } catch {}
+}
+
+function writeSnap(previewId, html, hash = fileHash(html)) {
+  const file = snapPath(previewId, hash);
+  if (!file) return;
+  if (fs.existsSync(file)) return touchSnap(file);
+  try { writeFileAtomic(file, html); } catch { return; }
+  pruneSnaps(previewId);
+}
+
+/** The bytes of that version, or null when they are gone or are not what the hash says. */
+function readSnap(previewId, hash) {
+  const file = snapPath(previewId, hash);
+  if (!file) return null;
+  try {
+    const html = fs.readFileSync(file, 'utf8');
+    if (fileHash(html) !== hash) return null;
+    touchSnap(file);
+    return html;
+  } catch { return null; }
+}
+
+/**
+ * Where a comment on a served HTML file was pointing, in that file, or null.
+ * Null is not a failed comment: the pin keeps its selector and nothing more.
+ */
+function sourceFor(previewId, pv, pageUrl, anchor) {
+  if (pv?.kind !== 'html' || !pv.entry) return null;
+  if (fileFor(pageUrl) !== pv.entry) return null;
+  const buf = readIfFile(pv.entry);
+  if (!buf) return null;
+  const html = buf.toString('utf8');
+  try {
+    const source = captureSource(html, anchor || {});
+    if (!source) return null;
+    writeSnap(previewId, html, source.hash);
+    return source;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -747,7 +838,59 @@ const server = http.createServer(async (req, res) => {
       };
       broadcast(key, payload);
       saveState();
-      return json(res, 200, { ok: true, n, shot: Boolean(shot) });
+      // For the overlay, not the session. The notification already describes the anchor; this is
+      // how the pin finds it again after the file is edited. Missing means the pin stays as it
+      // was — a comment is not refused because the file could not be anchored.
+      const source = sourceFor(b.previewId, pv, b.page?.url, b.anchor);
+      return json(res, 200, { ok: true, n, shot: Boolean(shot), ...(source ? { source } : {}) });
+    }
+
+    /**
+     * A served HTML file changed after the comment was left. The overlay asks, once it is
+     * looking at the file, where each pin's source anchor went. Extension-only, like /comment:
+     * the answer is where the user's pins move, and a page does not get to say.
+     *
+     * A preview that is not a file we serve answers with nothing to move. The overlay leaves
+     * those pins on their selectors.
+     */
+    if (p === '/reanchor' && req.method === 'POST') {
+      if (!isExtension(req.headers.origin)) {
+        return json(res, 403, { error: 'only the extension may reanchor' });
+      }
+      const b = await readBody(req);
+      const pv = previews.get(b.previewId);
+      if (!pv?.entry || pv.kind !== 'html') return json(res, 200, { pins: [] });
+      const buf = readIfFile(pv.entry);
+      if (!buf) return json(res, 404, { error: 'file is gone' });
+      const html = buf.toString('utf8');
+      // One parse of the file on disk and of each old version, however many pins ask, and one
+      // clock for all of them: this runs on the loop every session's comments arrive on.
+      const move = relocator(html);
+      const hash = fileHash(html);
+      const versions = new Map();
+      const versionOf = (h) => {
+        if (!versions.has(h)) versions.set(h, readSnap(b.previewId, h));
+        return versions.get(h);
+      };
+      const pins = Array.isArray(b.pins) ? b.pins.slice(0, 100) : [];
+      let moved = false;
+      const out = pins.map((pin) => {
+        const src = pin?.source;
+        if (!src || typeof src !== 'object' || typeof src.hash !== 'string') return { n: pin?.n, skipped: true };
+        if (src.hash === hash) return { n: pin.n, same: true };
+        try {
+          const result = move(versionOf(src.hash), src);
+          if (result.source) moved = true;
+          return { n: pin.n, ...result };
+        } catch {
+          return { n: pin.n, lost: true };
+        }
+      });
+      // A pin that moved now carries a source for this version, and a pin already on it has one,
+      // so this version is what the next edit has to be matched from. Kept whether or not the
+      // overlay adopts the move: a pin that does not still has its old version, also kept.
+      if (moved || out.some((r) => r.same)) writeSnap(b.previewId, html, hash);
+      return json(res, 200, { hash, pins: out });
     }
 
     if (p === '/events') {

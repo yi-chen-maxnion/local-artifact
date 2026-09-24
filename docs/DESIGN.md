@@ -531,6 +531,24 @@ pin disappears and the panel says so. An anchor pointing confidently at the wron
 than one that admits it is lost. The count still includes it, and the list still shows it, marked
 as lost: the comment was left here, it just cannot be pointed at right now.
 
+**A served HTML file is the exception, and only that file.** Claude edits the file the bridge is
+serving, which is exactly the text and the class the selector was built from, so on reload the
+pin would stay lost on top of the element it still means. When the comment is sent the bridge
+records a source anchor against the file as it is then — a slice of the source, the context
+around it, and where it sat in the tree — and keeps that version of the bytes, named by its hash.
+The file may already be newer than the tab the user is looking at, so the element the file has at
+that spot must agree with what was pointed at, by tag and by the start of its text; if it does
+not, no anchor is recorded and the pin is only its selector. The next time the overlay loads the
+file it asks `/reanchor`. A unique match moves the pin: the selector is rebuilt from the node the
+chain names, and only if that node is actually in the DOM on screen. The pin then carries an
+anchor for the new version, and that version is kept too, so the edit after it is matched from
+there; the newest eight versions of a file are kept. A tie, or a chain the current DOM does not
+contain, leaves the pin where it was. The match has a clock and a size limit, because it runs on
+the loop every session's comments arrive on; past either, the pin is lost for that load and asked
+about again on the next. Lost still means lost. The model is not asked to update anything, and
+nothing is written into the file. A dev server is not this case: there the DOM is not the file,
+and a miss stays a miss.
+
 The scroll listener is registered in the **capture phase**, which is the other half of the same
 bug. Scroll events do not bubble, so the plain listener it replaced only ever heard the *window*
 move — in an app that scrolls a panel rather than the document, exactly the thing that never

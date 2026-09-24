@@ -240,6 +240,12 @@ async function sendComment(payload) {
   return call('/comment', { body: payload });
 }
 
+/** Where pins on a served HTML file moved after that file was edited. Same path as a comment. */
+async function reanchor(payload) {
+  if (!payload?.previewId) return { error: 'this page is not bound to a session - reload it' };
+  return call('/reanchor', { body: payload });
+}
+
 /**
  * The Slack routes go through the worker for the same reason comments do - a page on an https
  * origin cannot reach loopback - and for one more: the bridge answers them only to this
@@ -330,7 +336,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   }
 
   const ask = {
-    slackDestinations, slackShare, slackStatus, slackLogin, slackLogout, status,
+    slackDestinations, slackShare, slackStatus, slackLogin, slackLogout, status, reanchor,
   }[msg?.type];
   if (ask) {
     ask(msg.payload)

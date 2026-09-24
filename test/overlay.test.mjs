@@ -18,6 +18,7 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detailLines } from '../lib/format.mjs';
+import { chainOf } from '../lib/reanchor.mjs';
 import { allElements, overlayWindow } from './dom.mjs';
 
 const page = await overlayWindow();
@@ -714,5 +715,142 @@ describe('askExtension: an ask always settles - answered, answered with rubbish,
     } finally {
       ext.chrome.runtime.id = 'testextensionid';
     }
+  });
+});
+
+/**
+ * The pin's selector describes the file as it was. After the edit, /reanchor names the node in
+ * the file as it is, and the overlay takes that on only when the DOM it is looking at is that
+ * file. The marker the bridge would move is asserted by which node the new selector hits.
+ */
+describe('reanchor: a served HTML file', () => {
+  const origin = 'http://127.0.0.1:4317';
+  const previewId = 'abcdef1234';
+  const here = '/p/abcdef1234/';
+  const storeKey = `cc-pins-${previewId}`;
+
+  function served(html, pin, answer) {
+    return overlayWindow({
+      url: origin + here,
+      config: { origin, previewId },
+      html,
+      storage: { [storeKey]: JSON.stringify([pin]) },
+      sendMessage(msg, respond) {
+        if (msg.type !== 'reanchor') { respond({}); return; }
+        answer(msg, respond);
+      },
+    });
+  }
+
+  const saved = (w) => JSON.parse(w.window.localStorage.getItem(storeKey));
+
+  test('a page that is not a served file never asks', async () => {
+    const w = await overlayWindow();
+    try {
+      assert.equal(w.requests.some((m) => m.type === 'reanchor'), false);
+    } finally { await w.close(); }
+  });
+
+  test('domChain is the chain the bridge reads back from the file', () => {
+    const inner = '<section><article class="card"><h2 id="t">Hello</h2></article></section>';
+    const doc = setBody(inner);
+    // The chain is built inside the jsdom realm, so compare the data, not the two Object prototypes.
+    const chain = Array.from(api.domChain(doc.getElementById('t')), (s) => ({ tag: String(s.tag), index: s.index }));
+    assert.deepEqual(chain, chainOf(inner, { id: 't' }));
+  });
+
+  test('adopts the chain, and the new selector hits only that node', async () => {
+    const html = '<!doctype html><html><body><div class="wrap"><h1 id="t">Welcome</h1></div></body></html>';
+    const chain = [{ tag: 'div', index: 0 }, { tag: 'h1', index: 0 }];
+    const w = await served(html, {
+      kind: 'element', selector: 'h1.gone', n: 1, comment: 'retitle', page: here,
+      source: { hash: 'old', kind: 'element' }, ts: 1,
+    }, (msg, respond) => {
+      assert.equal(msg.payload.previewId, previewId);
+      assert.equal(msg.payload.pins[0].source.hash, 'old');
+      respond({
+        hash: 'new',
+        pins: [{ n: 1, chain, tag: 'h1', id: 't', source: { hash: 'new', kind: 'element' } }],
+      });
+    });
+    try {
+      await w.api.reanchorNow();
+      const pin = saved(w)[0];
+      const node = w.api.nodeFromChain(chain);
+      assert.equal(node.id, 't');
+      assert.equal(pin.selector, w.api.cssSelector(node));
+      assert.equal(w.document.querySelectorAll(pin.selector).length, 1);
+      assert.equal(w.document.querySelector(pin.selector), node);
+      assert.equal(pin.source.hash, 'new');
+    } finally { await w.close(); }
+  });
+
+  test('a region follows the element its rectangle hangs off', async () => {
+    const html = '<!doctype html><html><body><article id="card">Hi</article></body></html>';
+    const w = await served(html, {
+      kind: 'region', selector: 'article.gone',
+      ref: { selector: 'article.gone', dx: 3, dy: 4 },
+      w: 20, h: 10, n: 1, comment: 'card', page: here,
+      source: { hash: 'old', kind: 'region' }, ts: 1,
+    }, (_msg, respond) => {
+      respond({
+        pins: [{
+          n: 1, chain: [{ tag: 'article', index: 0 }], tag: 'article', id: 'card',
+          source: { hash: 'new', kind: 'region' },
+        }],
+      });
+    });
+    try {
+      await w.api.reanchorNow();
+      const pin = saved(w)[0];
+      assert.equal(pin.ref.selector, w.api.cssSelector(w.document.getElementById('card')));
+      assert.equal(pin.ref.dx, 3);
+      assert.equal(pin.ref.dy, 4);
+      assert.equal(pin.selector, 'article.gone');
+    } finally { await w.close(); }
+  });
+
+  test('a lost anchor keeps its selector, and the list counts it lost', async () => {
+    const w = await served('<!doctype html><html><body><p>other</p></body></html>', {
+      kind: 'element', selector: 'h1.gone', n: 1, comment: 'retitle', page: here,
+      source: { hash: 'old' }, ts: 1,
+    }, (_msg, respond) => respond({ pins: [{ n: 1, lost: true }] }));
+    try {
+      await w.api.reanchorNow();
+      assert.equal(saved(w)[0].selector, 'h1.gone');
+      w.api.openList();
+      const row = w.shadow.querySelector('.item.lost');
+      assert.ok(row, 'the lost comment is not in the list');
+      assert.match(row.textContent, /retitle/);
+    } finally { await w.close(); }
+  });
+
+  test('a chain the DOM on screen does not contain is not written', async () => {
+    const w = await served('<!doctype html><html><body><h1 id="t">Hello</h1></body></html>', {
+      kind: 'element', selector: '#t', n: 1, comment: 'x', page: here,
+      source: { hash: 'old' }, ts: 1,
+    }, (_msg, respond) => respond({
+      pins: [{
+        n: 1, chain: [{ tag: 'div', index: 0 }, { tag: 'h1', index: 0 }],
+        tag: 'h1', id: 't', source: { hash: 'new' },
+      }],
+    }));
+    try {
+      await w.api.reanchorNow();
+      const pin = saved(w)[0];
+      assert.equal(pin.selector, '#t');
+      assert.equal(pin.source.hash, 'old');
+    } finally { await w.close(); }
+  });
+
+  test('an unchanged file does not rewrite the selector', async () => {
+    const w = await served('<!doctype html><html><body><h1 id="t">Hello</h1></body></html>', {
+      kind: 'element', selector: '#t', n: 1, comment: 'x', page: here,
+      source: { hash: 'same' }, ts: 1,
+    }, (_msg, respond) => respond({ pins: [{ n: 1, same: true }] }));
+    try {
+      await w.api.reanchorNow();
+      assert.equal(saved(w)[0].selector, '#t');
+    } finally { await w.close(); }
   });
 });
