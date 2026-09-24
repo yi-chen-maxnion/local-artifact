@@ -2147,12 +2147,17 @@
       disarmTimer = setTimeout(disarmDelete, 3000);
       return;
     }
+    removePin(p);
+  });
+
+  function removePin(p) {
     pins = pins.filter((x) => x !== p);
-    savePins();
+    // Said out loud, so another tab's copy of this pin does not bring it back on its next save.
+    savePins([pinKey(p)]);
     closePopover();
     renderPins();
     watchDom(); // the last pin takes the DOM observer with it
-  });
+  }
 
   // Only a real click sends. With the panel in a closed shadow root a page script cannot reach
   // these buttons, and this makes sure a synthesised event cannot stand in for the user either.
@@ -2438,7 +2443,8 @@
     // `source` is how a pin on a served HTML file is found again after that file is edited.
     // Absent — any other page, or a node the file could not be tied to — and the pin is only
     // its selector, which is what it always was.
-    const pin = { ...loc, n, comment, label: labelFor(anchor), ts: Date.now(), page: pageKey() };
+    const at = Date.now();
+    const pin = { ...loc, n, comment, label: labelFor(anchor), ts: at, edited: at, page: pageKey() };
     if (source && typeof source === 'object') pin.source = source;
     pins.push(pin);
     state.fresh = pin; // so this one, and only this one, gets an entrance
@@ -2449,17 +2455,106 @@
 
   const PINS_KEPT = 100;
 
+  /**
+   * One list per origin, shared by every tab open on it - on the bridge's origin that is every
+   * served file at once, since they all bind to the one origin record. So no tab's copy is ever
+   * the list: each write takes in what the others wrote first, and each tab folds their writes in
+   * as they happen. Writing a tab's own copy whole, as this once did, erased every pin another
+   * tab had added since this one loaded.
+   *
+   * A pin is known by its page and its number - the bridge numbers comments per page - and the
+   * later edit of it wins (`edited`: set when it is added, and when a re-anchor moves it), so a
+   * selector re-anchored in one tab is not put back by another tab still holding the old one.
+   * A deleted pin leaves a tombstone under a key of its own, kept apart from the list so a tab
+   * running an older overlay still reads the list it knows; without it, the next save from a tab
+   * that still had the pin would bring it back.
+   */
+  const GONE_KEY = `${PIN_KEY}-gone`;
+  const GONE_KEPT = 200;
+  const pinKey = (p) => `${p.page || ''}#${p.n}`;
+  const editedAt = (p) => Number(p.edited || p.ts) || 0;
   /** Fields starting with `_` are runtime only - cached nodes, ranges, the pin's button. */
-  function savePins() {
-    if (pins.length > PINS_KEPT) pins = pins.slice(-PINS_KEPT);
-    const save = pins.map((p) => Object.fromEntries(Object.entries(p).filter(([k]) => !k.startsWith('_'))));
-    try { localStorage.setItem(PIN_KEY, JSON.stringify(save)); } catch {}
+  const persisted = (p) => Object.fromEntries(Object.entries(p).filter(([k]) => !k.startsWith('_')));
+  const readList = (key) => {
+    try {
+      const v = JSON.parse(localStorage.getItem(key) || '[]');
+      return Array.isArray(v) ? v : [];
+    } catch { return []; }
+  };
+  const readGone = () => new Map(readList(GONE_KEY).filter((g) => Array.isArray(g) && g.length === 2));
+
+  /**
+   * Takes another pin's stored fields over this tab's copy, keeping the copy - its button and its
+   * list row are drawn from it. What the copy had resolved no longer applies to the new fields.
+   */
+  function adoptStored(p, s) {
+    const sameSource = p.source?.hash === s.source?.hash;
+    for (const k of Object.keys(p)) if (!k.startsWith('_')) delete p[k];
+    Object.assign(p, s);
+    p._el = p._ref = p._holder = p._range = null;
+    p._miss = false;
+    if (!sameSource) p._gone = false;
   }
 
-  const loadPins = () => {
-    try { return JSON.parse(localStorage.getItem(PIN_KEY) || '[]'); } catch { return []; }
-  };
-  let pins = loadPins();
+  /**
+   * Folds the stored list - other tabs' writes - into this tab's. Reads only; returns whether
+   * anything here changed. A pin only this tab holds stays: every pin is written the moment it
+   * changes, so that is one another tab dropped by keeping only the newest hundred, and the
+   * newest hundred is what the next write keeps again.
+   */
+  function foldStored() {
+    const gone = readGone();
+    const buried = (p) => gone.has(pinKey(p)) && gone.get(pinKey(p)) >= editedAt(p);
+    const stored = new Map();
+    for (const s of readList(PIN_KEY)) if (s && typeof s === 'object') stored.set(pinKey(s), s);
+    let changed = false;
+    const next = [];
+    const held = new Set();
+    for (const p of pins) {
+      const k = pinKey(p);
+      held.add(k);
+      if (buried(p)) { changed = true; continue; }
+      const s = stored.get(k);
+      if (s && editedAt(s) > editedAt(p)) { adoptStored(p, s); changed = true; }
+      next.push(p);
+    }
+    for (const [k, s] of stored) {
+      if (held.has(k) || buried(s)) continue;
+      next.push({ ...s });
+      changed = true;
+    }
+    if (changed) pins = next.sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0));
+    return changed;
+  }
+
+  /** Writes this tab's changes - `removed` names pins it deleted - over whatever is stored now. */
+  function savePins(removed = []) {
+    try {
+      if (removed.length) {
+        const gone = [...readGone(), ...removed.map((k) => [k, Date.now()])];
+        localStorage.setItem(GONE_KEY, JSON.stringify(gone.slice(-GONE_KEPT)));
+      }
+      foldStored();
+      if (pins.length > PINS_KEPT) pins = pins.slice(-PINS_KEPT);
+      localStorage.setItem(PIN_KEY, JSON.stringify(pins.map(persisted)));
+    } catch {}
+  }
+
+  let pins = [];
+  foldStored();
+
+  /**
+   * Another tab wrote the list. The `storage` event fires in every tab on the origin but the one
+   * that wrote, so this is how a pin left in one tab shows up in the other without a reload - and
+   * how a delete there takes it off here.
+   */
+  addEventListener('storage', (e) => {
+    if (e.key !== PIN_KEY && e.key !== GONE_KEY && e.key !== null) return;
+    if (!foldStored()) return;
+    if (state.viewing && !pins.includes(state.viewing)) closePopover({ instant: true });
+    renderPins();
+    watchDom();
+  }, { signal: alive });
 
   /**
    * A served HTML file was edited out from under the selector. Adopt the bridge's chain only
@@ -2489,6 +2584,8 @@
     if (pin.kind === 'region' && pin.ref) pin.ref = { ...pin.ref, selector: sel };
     else pin.selector = sel;
     if (result.source && typeof result.source === 'object') pin.source = result.source;
+    // An edit of this pin: the other tabs' copies of it are older now, and lose to it.
+    pin.edited = Date.now();
     pin._el = pin._ref = pin._holder = pin._range = null;
     pin._miss = false;
     return true;
@@ -2998,6 +3095,10 @@
       // What a click on this element in comment mode does. The tool's own buttons and keys answer
       // trusted events only, which a test cannot make, so this is the way into a panel from here.
       compose: (node) => { const a = describe(node); openPopover(a, locatorFor(a, node)); },
+      // Send and Delete, which likewise answer trusted clicks only. A pin is named by its number
+      // on this page; the list itself stays off the seam.
+      submit: () => submit(),
+      remove: (n) => { const p = pins.find((x) => x.n === n && x.page === pageKey()); if (p) removePin(p); },
     });
   }
 })();

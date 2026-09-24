@@ -35,6 +35,47 @@ try {
 const SOURCE = fs.readFileSync(OVERLAY_SRC, 'utf8');
 
 /**
+ * One origin's localStorage, for several windows at once - the way two tabs on one origin share
+ * it in a browser, which separate jsdom windows do not. Pass it to `overlayWindow({ shared })`.
+ * A write in one window fires `storage` in each of the others and never in the writer, after the
+ * write, as a browser does; `flush()` waits for those events to have been delivered.
+ */
+export function sharedStorage() {
+  const map = new Map();
+  const windows = new Set();
+  const notify = (from, key, oldValue, newValue) => {
+    for (const w of windows) {
+      if (w === from) continue;
+      w.setTimeout(() => w.dispatchEvent(new w.StorageEvent('storage', {
+        key, oldValue, newValue, url: from.location.href,
+      })), 0);
+    }
+  };
+  const area = (win) => ({
+    get length() { return map.size; },
+    key: (i) => [...map.keys()][i] ?? null,
+    getItem: (k) => (map.has(String(k)) ? map.get(String(k)) : null),
+    setItem(k, v) {
+      const old = this.getItem(k);
+      map.set(String(k), String(v));
+      notify(win, String(k), old, String(v));
+    },
+    removeItem(k) {
+      const old = this.getItem(k);
+      map.delete(String(k));
+      notify(win, String(k), old, null);
+    },
+    clear() { map.clear(); notify(win, null, null, null); },
+  });
+  return {
+    map,
+    windows,
+    area,
+    flush: () => new Promise((r) => setTimeout(r, 20)),
+  };
+}
+
+/**
  * A window with the overlay already loaded in it.
  *
  * The overlay closes over the `document` it started in, so every fixture has to be written into
@@ -68,6 +109,7 @@ export async function overlayWindow({
   html = '<!doctype html><html><body></body></html>',
   keepHost = false,
   before = null,
+  shared = null,
 } = {}) {
   const dom = new JSDOM(html, {
     url,
@@ -117,6 +159,10 @@ export async function overlayWindow({
     previewId: 'abcdef1234', origin: 'http://127.0.0.1:4317', repo: 'repo', slack: null,
     ...config,
   };
+  if (shared) {
+    shared.windows.add(window);
+    Object.defineProperty(window, 'localStorage', { value: shared.area(window), configurable: true });
+  }
   if (storage) {
     for (const [key, value] of Object.entries(storage)) window.localStorage.setItem(key, value);
   }
@@ -202,7 +248,7 @@ export async function overlayWindow({
       return window.document;
     },
     /** Takes the window's timers down with it, so the test process can exit. */
-    close: () => window.close(),
+    close: () => { shared?.windows.delete(window); window.close(); },
   };
 }
 

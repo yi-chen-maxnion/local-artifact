@@ -19,7 +19,7 @@ import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detailLines } from '../lib/format.mjs';
 import { chainOf } from '../lib/reanchor.mjs';
-import { allElements, overlayWindow, waitFor } from './dom.mjs';
+import { allElements, overlayWindow, sharedStorage, waitFor } from './dom.mjs';
 
 const page = await overlayWindow();
 after(() => page.close());
@@ -1131,5 +1131,154 @@ describe('updates: one overlay per page, and an old one leaves', () => {
       // Not every message is this one: anything else is not answered here.
       assert.equal(await w.tell({ type: 'something-else' }), undefined);
     } finally { await w.close(); }
+  });
+});
+
+/**
+ * Every tab on an origin shares one list of pins in localStorage - on the bridge's origin that is
+ * every served file, since they all bind to the one origin record. Each overlay used to keep the
+ * list it loaded and write it back whole, so the last tab to save erased the pins every other tab
+ * had added since it loaded: a pin left in one tab was gone after a comment in another and a
+ * reload. Each window here is a tab; `sharedStorage` is the one localStorage they share, which
+ * fires `storage` in the others on every write, as a browser does.
+ */
+describe('pins: every tab on the origin shares one list', () => {
+  const origin = 'http://127.0.0.1:4317';
+  const previewId = 'abcdef1234';
+  const KEY = `cc-pins-${previewId}`;
+  const stored = (shared) => JSON.parse(shared.map.get(KEY) || '[]');
+  const keys = (list) => list.map((p) => `${p.page}#${p.n}`).sort();
+  const html = '<!doctype html><html><body><div class="wrap"><h1 id="t">Welcome</h1></div><p id="p">Text</p></body></html>';
+
+  /** A tab on `path`, whose worker numbers comments from `first` and answers everything else. */
+  function tabOn(shared, path, { first = 1, reanchor = null } = {}) {
+    let n = first;
+    return overlayWindow({
+      url: origin + path,
+      config: { origin, previewId },
+      html,
+      shared,
+      sendMessage(msg, respond) {
+        if (msg.type === 'comment') return respond({ n: n++ });
+        if (msg.type === 'reanchor' && reanchor) return respond(reanchor(msg));
+        respond({ error: 'not in this test' });
+      },
+    });
+  }
+  /** A comment sent from this tab, the way Send sends one. */
+  async function comment(w, text) {
+    w.api.compose(w.document.getElementById('p'));
+    w.shadow.querySelector('textarea').value = text;
+    await w.api.submit();
+  }
+  const listed = (w) => { w.api.openList(); return [...w.shadow.querySelectorAll('.item')].map((r) => r.textContent); };
+
+  test('comments interleaved in two tabs are all kept', async () => {
+    const shared = sharedStorage();
+    const a = await tabOn(shared, '/p/one/');
+    const b = await tabOn(shared, '/p/two/');
+    try {
+      await comment(a, 'first in one');
+      await comment(b, 'first in two');
+      await comment(a, 'second in one');
+      await shared.flush();
+      assert.deepEqual(keys(stored(shared)), ['/p/one/#1', '/p/one/#2', '/p/two/#1']);
+      // A tab opened now - a reload - finds all three.
+      const again = await tabOn(shared, '/p/one/');
+      try {
+        assert.equal(listed(again).length, 2);
+      } finally { await again.close(); }
+    } finally { await a.close(); await b.close(); }
+  });
+
+  test('a write keeps what another tab stored and this one never heard about', async () => {
+    const shared = sharedStorage();
+    const b = await tabOn(shared, '/p/two/');
+    try {
+      // Stored behind this tab's back: no event, as if it had not arrived yet.
+      shared.map.set(KEY, JSON.stringify([
+        { kind: 'element', selector: '#t', n: 1, comment: 'other tab', page: '/p/one/', ts: 1, edited: 1 },
+      ]));
+      await comment(b, 'mine');
+      assert.deepEqual(keys(stored(shared)), ['/p/one/#1', '/p/two/#1']);
+      assert.equal(stored(shared).find((p) => p.page === '/p/one/').comment, 'other tab');
+    } finally { await b.close(); }
+  });
+
+  test('nothing that exists only at run time is stored', async () => {
+    const shared = sharedStorage();
+    const a = await tabOn(shared, '/p/one/');
+    try {
+      await comment(a, 'x');
+      listed(a); // gives the pin its list row, a runtime field
+      await comment(a, 'y');
+      for (const p of stored(shared)) {
+        assert.deepEqual(Object.keys(p).filter((k) => k.startsWith('_')), [], JSON.stringify(Object.keys(p)));
+      }
+    } finally { await a.close(); }
+  });
+
+  test('a re-anchor in one tab is not put back by another tab still holding the old pin', async () => {
+    const shared = sharedStorage();
+    const page = '/p/one/';
+    shared.map.set(KEY, JSON.stringify([{
+      kind: 'element', selector: 'h1.gone', n: 1, comment: 'retitle', page,
+      source: { hash: 'old', kind: 'element' }, ts: 1,
+    }]));
+    // The other tab loaded the old pin, and its own re-anchor changed nothing.
+    const b = await tabOn(shared, page, { first: 2, reanchor: () => ({ pins: [{ n: 1, same: true }] }) });
+    await b.api.reanchorNow();
+    // This tab follows the edit.
+    const a = await tabOn(shared, page, {
+      reanchor: () => ({
+        pins: [{
+          n: 1, chain: [{ tag: 'div', index: 0 }, { tag: 'h1', index: 0 }], tag: 'h1', id: 't',
+          source: { hash: 'new', kind: 'element' },
+        }],
+      }),
+    });
+    try {
+      await a.api.reanchorNow();
+      assert.equal(stored(shared)[0].source.hash, 'new');
+      await shared.flush();
+      await comment(b, 'a second one');
+      const one = stored(shared).find((p) => p.n === 1);
+      assert.equal(one.source.hash, 'new', 'the other tab wrote its old copy back');
+      assert.equal(one.selector, '#t');
+      assert.equal(stored(shared).length, 2);
+    } finally { await a.close(); await b.close(); }
+  });
+
+  test('a pin deleted in one tab stays deleted when another tab saves', async () => {
+    const shared = sharedStorage();
+    const a = await tabOn(shared, '/p/one/');
+    const b = await tabOn(shared, '/p/one/', { first: 2 });
+    try {
+      await comment(a, 'to delete');
+      await shared.flush();
+      a.api.remove(1);
+      // The other tab saves before it has heard of the delete.
+      await comment(b, 'kept');
+      await shared.flush();
+      assert.deepEqual(keys(stored(shared)), ['/p/one/#2']);
+      assert.deepEqual(listed(b).length, 1);
+    } finally { await a.close(); await b.close(); }
+  });
+
+  test('another tab\'s comment, and its delete, show up here without a reload', async () => {
+    const shared = sharedStorage();
+    const a = await tabOn(shared, '/p/one/');
+    const b = await tabOn(shared, '/p/one/', { first: 2 });
+    try {
+      assert.equal(listed(b).length, 0);
+      await comment(a, 'from the other tab');
+      await shared.flush();
+      const rows = listed(b);
+      assert.equal(rows.length, 1);
+      assert.match(rows[0], /from the other tab/);
+      a.api.remove(1);
+      await shared.flush();
+      assert.equal(listed(b).length, 0);
+    } finally { await a.close(); await b.close(); }
   });
 });
