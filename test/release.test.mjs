@@ -108,8 +108,12 @@ describe('the bump, file by file', () => {
 describe('release(), end to end in a scratch repository', () => {
   const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
-  /** A repo on dev one commit ahead of main, both pushed, holding this repo's version files. */
-  function scratch() {
+  /**
+   * A repo on dev one commit ahead of main, holding this repo's version files. Both are pushed,
+   * unless `pushed` is false: the remote is then as GitHub makes a new repository, with no
+   * branches at all - which is where the first release goes.
+   */
+  function scratch({ pushed = true } = {}) {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-release-'));
     const remote = path.join(base, 'remote.git');
     const work = path.join(base, 'work');
@@ -126,12 +130,12 @@ describe('release(), end to end in a scratch repository', () => {
     git(work, 'add', '-A');
     git(work, 'commit', '-m', 'first');
     git(work, 'remote', 'add', 'origin', remote);
-    git(work, 'push', '-q', 'origin', 'main');
+    if (pushed) git(work, 'push', '-q', 'origin', 'main');
     git(work, 'checkout', '-q', '-b', 'dev');
     fs.writeFileSync(path.join(work, 'work.txt'), 'a change on dev');
     git(work, 'add', '-A');
     git(work, 'commit', '-m', 'work');
-    git(work, 'push', '-q', 'origin', 'dev');
+    if (pushed) git(work, 'push', '-q', 'origin', 'dev');
     return { work, remote };
   }
 
@@ -181,7 +185,7 @@ describe('release(), end to end in a scratch repository', () => {
     };
     release({ version: next, root: work, dryRun: true, checks: [['npm', ['test']]], log: (l) => lines.push(l), run });
     // Only reads ran: everything else was printed.
-    for (const cmd of ran) assert.match(cmd, /^git (rev-parse|status|tag --list|merge-base)/, cmd);
+    for (const cmd of ran) assert.match(cmd, /^git (rev-parse|status|tag --list|merge-base|ls-remote|cat-file)/, cmd);
     const text = lines.join('\n');
     for (const want of ['would run  npm test', `would bump  .claude-plugin/plugin.json ${current} -> ${next}`,
       'would bump  extension/background.js', 'would run  git commit', 'would run  git checkout main',
@@ -209,6 +213,47 @@ describe('release(), end to end in a scratch repository', () => {
     // Nothing was written by any of them.
     assert.equal(versionsIn(work)['.claude-plugin/plugin.json'], current);
     assert.equal(git(work, 'tag', '--list'), '');
+  });
+
+  /**
+   * The first release: the repository on GitHub is new and has no branches, so there is no
+   * origin/main to be behind. The dry run says so and goes on; the release itself creates main,
+   * dev and the tag on the remote in its one push.
+   */
+  test('an empty remote is a first release, not a refusal', () => {
+    const { work, remote } = scratch({ pushed: false });
+    const lines = [];
+    release({ version: next, root: work, dryRun: true, checks: [], log: (l) => lines.push(l) });
+    assert.ok(lines.includes('note  origin has no main yet - nothing to fast-forward from; the push creates it'), lines.join('\n'));
+    assert.ok(lines.includes('note  origin has no dev yet - nothing to fast-forward from; the push creates it'));
+    assert.equal(lines.at(-1), `dry run - nothing changed; v${next} would be released`);
+    assert.equal(git(remote, 'branch', '--list'), '');
+
+    release({ version: next, root: work, checks: [], log: () => {} });
+    const head = git(work, 'rev-parse', 'dev');
+    assert.equal(git(remote, 'rev-parse', 'main'), head);
+    assert.equal(git(remote, 'rev-parse', 'dev'), head);
+    assert.equal(git(remote, 'rev-parse', `v${next}^{commit}`), head);
+  });
+
+  // The atomic push would be refused for a dev the remote has moved on; refused before the commit.
+  test('refuses when the remote dev has commits dev does not', () => {
+    const { work } = scratch();
+    const other = path.join(path.dirname(work), 'other');
+    git(path.dirname(work), 'clone', '-q', '-b', 'dev', path.join(path.dirname(work), 'remote.git'), other);
+    for (const [k, v] of [['user.name', 'test'], ['user.email', 'test@example.invalid'], ['commit.gpgsign', 'false']]) {
+      git(other, 'config', k, v);
+    }
+    fs.writeFileSync(path.join(other, 'theirs.txt'), 'pushed from elsewhere');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-q', '-m', 'theirs');
+    git(other, 'push', '-q', 'origin', 'dev');
+    const head = git(work, 'rev-parse', 'HEAD');
+    // A dry run does not fetch, so it has never seen that commit; a real run fetches it.
+    assert.throws(() => release({ version: next, root: work, dryRun: true, checks: [], log: () => {} }), /origin\/dev has commits this clone has never fetched/);
+    assert.throws(() => release({ version: next, root: work, checks: [], log: () => {} }), /origin\/dev has commits dev does not/);
+    assert.equal(git(work, 'rev-parse', 'HEAD'), head);
+    assert.equal(git(work, 'status', '--porcelain'), '');
   });
 
   // A main with a commit dev lacks would fail the fast-forward after the commit; it is refused first.

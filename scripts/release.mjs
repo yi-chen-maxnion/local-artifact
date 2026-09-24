@@ -168,12 +168,33 @@ export function release({
 
   // Refused here rather than discovered after the commit: if origin's main has moved past ours, or
   // ours is not behind dev, the fast-forward or the atomic push fails and dev is left a commit up.
-  // A dry run does not fetch, so it judges by what was fetched last.
   step('git', ['fetch', 'origin', '--tags']);
   const ancestor = (a, b) => {
     try { git('merge-base', '--is-ancestor', a, b); return true; } catch { return false; }
   };
-  if (!ancestor('origin/main', 'main')) throw new Error('origin/main has commits main does not, or is missing - fast-forward main first');
+  const known = (sha) => {
+    try { git('cat-file', '-e', `${sha}^{commit}`); return true; } catch { return false; }
+  };
+  try { git('rev-parse', '--verify', '--quiet', 'refs/heads/main'); } catch {
+    throw new Error('there is no local main branch - create it from the last release (or from dev for the first one)');
+  }
+  /**
+   * What the remote holds now, asked of the remote itself (`ls-remote` reads, it changes nothing,
+   * so a dry run asks too): the push must be a fast-forward of each branch it names. A branch the
+   * remote does not have yet - the first release to an empty repository - has nothing to be
+   * behind, and is created by the push. One it has must be contained in ours; a commit of it we
+   * have never fetched cannot be, and is refused rather than guessed about.
+   */
+  for (const [branch, local] of [['main', 'main'], ['dev', 'dev']]) {
+    const line = git('ls-remote', '--heads', 'origin', `refs/heads/${branch}`);
+    const sha = line.split(/\s+/)[0];
+    if (!sha) {
+      log(`note  origin has no ${branch} yet - nothing to fast-forward from; the push creates it`);
+      continue;
+    }
+    if (!known(sha)) throw new Error(`origin/${branch} has commits this clone has never fetched - git fetch origin, then fast-forward ${local}`);
+    if (!ancestor(sha, local)) throw new Error(`origin/${branch} has commits ${local} does not - fast-forward ${local} first`);
+  }
   if (!ancestor('main', 'dev')) throw new Error('main is not an ancestor of dev - main takes releases only, so merge it into dev first');
 
   for (const [cmd, args] of checks) step(cmd, args);
