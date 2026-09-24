@@ -282,7 +282,7 @@ function loadState() {
   kept.sort((a, b) => b[1].at - a[1].at);
   // One record per origin and one per file - which a state file written before records lost their
   // session does not hold: back then an origin got a record per session that saw it, so an upgrade
-  // would carry the same origin several times over, list it twice in /comments, and leave the pins
+  // would carry the same origin several times over, list it twice in ctl.mjs status, and leave the pins
   // under every id but the first orphaned, since `previewFor` only ever returns that first match.
   // Most recently used wins, because its pins are the ones likeliest to still be on screen.
   const seen = new Set();

@@ -1,5 +1,5 @@
 ---
-description: Stop this session receiving comments from the browser; --stop also stops the bridge
+description: Use when the user is done reviewing and wants this session to stop receiving browser comments. Add --stop only when they want the bridge itself off, for every session.
 argument-hint: "[--stop]"
 ---
 

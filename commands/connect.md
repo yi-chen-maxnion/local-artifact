@@ -1,5 +1,5 @@
 ---
-description: Connect this session to the browser
+description: Use when the user wants the comments they leave on pages in the browser to reach this session - to start a review, or to take the browser back from another session or after /disconnect.
 ---
 
 The user wants this session connected to the browser, so comments from the pages they open reach

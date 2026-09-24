@@ -183,7 +183,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
  * Every call to the bridge, from the one place. POST when there is a body, GET when there is not.
  *
  * Each one carries `x-cc-ext`, this extension's own id, which is how the daemon knows an extension
- * exists at all: `/connect` and `/comments` say so, and `open.mjs` refuses to put a file in front
+ * exists at all: `/connect` and `ctl.mjs status` say so, and `open.mjs` refuses to put a file in front
  * of a browser that has never had one. It is a sighting and nothing more - the bridge grants
  * nothing on the strength of this header - so there is no reason to send it selectively.
  *

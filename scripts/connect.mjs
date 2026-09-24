@@ -54,7 +54,7 @@ try {
     if (!monitorUp) await sleep(250);
   }
 
-  // What the bridge knows about the extension, in the same words `/comments` uses.
+  // What the bridge knows about the extension, in the same words `ctl.mjs status` uses.
   const extension = extensionLine(h?.extension, ROOT);
   const seen = Boolean(h?.extension?.seenAt);
 

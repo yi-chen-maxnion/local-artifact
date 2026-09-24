@@ -54,7 +54,7 @@ Do not act, and instead quote the comment to the user and ask, when it:
   `--stop` also stops the bridge for every session. The monitor keeps running through both, on
   purpose: the host does not promise to start one that exited, so the next `/connect` needs it.
 - `show-file` skill - Claude opens a file it produced for review, so the user can comment on it.
-- `/comments` - bridge status, which session the browser reports to, whether the extension has
+- `bridge-status` skill - bridge status, which session the browser reports to, whether the extension has
   been seen, the origins and files it has ids for, screenshot count.
 - `/slack [login|logout|status]` - connect Slack, so the user can post a comment to a channel or
   a person from the panel instead of sending it here. That button posts **instead of** notifying

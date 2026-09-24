@@ -327,7 +327,7 @@ describe('scripts/disconnect.mjs and ctl.mjs stop', () => {
     assert.equal(lines(out)[1], '   browser  comments go to elsewhere, as before');
   });
 
-  test('/comments in a disconnected session says so on the browser line', async () => {
+  test('ctl.mjs status in a disconnected session says so on the browser line', async () => {
     const { code, out } = await run(CTL, ['status'], {
       setup: async (key, pid) => {
         await register(bridge, key, pid);

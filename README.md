@@ -64,11 +64,11 @@ warns when it sees another port. Leave the daemon on 4517.
 | command | what it does |
 |---|---|
 | `/connect` | make this session the one every page reports to; takes no argument, opens nothing, starts the bridge if needed |
-| `/comments` | bridge status, which session the browser reports to, whether the extension has reached it, the origins and files it has ids for, screenshot count |
 | `/disconnect [--stop]` | this session stops receiving comments until it runs `/connect` again, and says where they go now; `--stop` also stops the bridge, and names the other sessions that just lost theirs |
 | `/slack [login\|logout\|status]` | connect Slack, so a comment can be posted to a channel or a person instead |
 
-That is the whole list. Local files are not opened by a command — Claude opens them itself, see
+That is the whole list. Checking the bridge is not a command either — ask Claude whether comments
+are working, and it checks. Local files are not opened by a command — Claude opens them itself, see
 [Claude opening a file for you](#claude-opening-a-file-for-you).
 
 **The session owns the browser, not a URL.** That is why `/connect` takes no target: run it once
@@ -285,10 +285,10 @@ any page in Chrome                 bridge daemon 127.0.0.1:4517        claude se
 - **`/connect` says the monitor is NOT ATTACHED.** The monitor did not arm: restart the session,
   and check that the `when` trigger in `monitors/monitors.json` is
   `on-skill-invoke:local-artifact:connect`.
-- **Another session holds the browser.** `/comments` names it on the `browser` line and the page's
+- **Another session holds the browser.** Claude's bridge check names it on the `browser` line and the page's
   own tooltip names the repo it is sending to; comments are going there. Run `/connect` here to
   take it over — it says which session it took it from.
-- **This session ran `/disconnect`.** `/comments` says `not this session - disconnected` on the
+- **This session ran `/disconnect`.** Claude's bridge check says `not this session - disconnected` on the
   `browser` line. Nothing hands the browser back to it — not another session ending, not the bridge
   restarting — until `/connect` runs here.
 - **The panel says the bridge is not answering.** The Claude session that owned it ended and the
@@ -306,7 +306,7 @@ any page in Chrome                 bridge daemon 127.0.0.1:4517        claude se
 - **Can't point at part of an iframe or an embedded viewer.** In comment mode these ignore the
   pointer so a drag over them becomes a region; leave comment mode to scroll them.
 
-`/comments` shows the bridge, the session the browser reports to, whether the extension has been
+Ask Claude to check the bridge: it shows the bridge, the session the browser reports to, whether the extension has been
 seen, and whether this session's monitor is connected.
 
 ## Layout
@@ -319,8 +319,8 @@ bridge/           server, static serving, markdown/text/image wrapper, scratch s
 scripts/          monitor.mjs (session side), connect.mjs, disconnect.mjs, open.mjs (Claude opens a file), ctl.mjs
 slack-app.json    the client id of the Slack app comments are posted through (not a secret)
 extension/        MV3 extension: service worker, overlay.js, console-hook.js, popup (toolbar menu)
-skills/           what Claude does with a comment (ui-comments), and how it opens a file (show-file)
-commands/         /connect, /disconnect, /comments, /slack
+skills/           what Claude does with a comment (ui-comments), how it opens a file (show-file), and checks the bridge (bridge-status)
+commands/         /connect, /disconnect, /slack
 fixtures/         pages for checking the overlay by hand
 test/             node --test suites: bridge routes, open.mjs's refusals, notification format,
                   overlay anchoring, and plugin.test.mjs for the monitor trigger

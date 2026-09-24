@@ -15,7 +15,7 @@ so with no extension installed there is no button anywhere and no comment can be
 
 That is a hard requirement rather than a degraded mode, so every entry point says so instead of
 doing less: `/connect` prints the one `extension` line `lib/format.mjs` builds and exits `3` when
-nothing has ever been seen, `scripts/open.mjs` refuses on the same rung, `/comments` prints the
+nothing has ever been seen, `scripts/open.mjs` refuses on the same rung, the bridge-status skill prints the
 same line, and the toolbar menu names the session the browser reports to. See *No extension*
 under **When a comment does not arrive**.
 
@@ -48,7 +48,7 @@ from one session would silently move the user's own pages to it. One rule, with 
 reason about: the last setup gesture is the one the user just made. When the session that owns the
 browser ends, it passes to the session that registered most recently. The corner button's tooltip,
 the toolbar menu and the compose panel all name the repo they are sending to, so this is visible
-rather than guessed; `/comments` prints it, and `/connect` says out loud when it has just taken
+rather than guessed; the bridge-status skill prints it, and `/connect` says out loud when it has just taken
 the browser from another live session, since that session is never told.
 
 **The toolbar icon opens a menu**: the session the browser reports to (or that none is connected,
@@ -946,7 +946,7 @@ connect, open a file and receive nothing, with no sign on screen of what is miss
 request the worker makes carries `x-cc-ext: <chrome.runtime.id>`, and the daemon records the
 sighting — but only beside a `chrome-extension://` Origin, since a page can send any header it
 likes through a preflight, and only as a timestamp, since nothing is ever granted on the strength
-of it. `/connect`, `/comments` and `open.mjs` print the one line `lib/format.mjs` builds from it;
+of it. `/connect`, the bridge-status skill and `open.mjs` print the one line `lib/format.mjs` builds from it;
 `/connect` and `open.mjs` exit `3` when nothing has ever been seen.
 
 **A stream that died without saying so.** Sleep the machine, drop the Wi-Fi or flip a VPN and the
@@ -1050,7 +1050,7 @@ not persisted (monitors re-register after a restart), which means the mark would
 them and a restarted daemon would let the first reconnecting monitor take the browser back. The
 detached keys are written to the state file with their pids, and an entry goes when its pid is no
 longer alive, at load and on every prune: a key is a pid, and a pid comes round again. Only
-`/connect` clears the mark. `/health` reports it per session, and `/comments` prints
+`/connect` clears the mark. `/health` reports it per session, and the bridge-status skill prints
 `not this session - disconnected; /connect to take it back` on the `browser` line.
 
 **Stopping the bridge is one routine** for `/shutdown`, SIGTERM, SIGINT, SIGHUP and the idle exit,
@@ -1073,8 +1073,9 @@ the new one at once.
 
 ## Slash commands
 
-There are four, and they are all the user has to know: `/connect`, `/disconnect [--stop]`,
-`/comments` and `/slack [login|logout|status]`. Nothing opens a file, because opening one is Claude's gesture —
+There are three, and they are all the user has to know: `/connect`, `/disconnect [--stop]`
+and `/slack [login|logout|status]`. Checking the bridge is not one of them: nobody but Claude reads
+that status, so it is the **bridge-status** skill, hidden from the `/` menu (`user-invocable: false`). Nothing opens a file, because opening one is Claude's gesture —
 `scripts/open.mjs`, taught by the **show-file** skill — and a command for it would be one more
 thing to remember for something the agent is better placed to do at the moment it has produced
 the file.

@@ -1,9 +1,12 @@
 ---
-description: Show the local comment bridge status - who the browser reports to, and the pages it has ids for
-argument-hint: "[status]"
+name: bridge-status
+description: Check the comment bridge. Use when a comment the user left in the browser did not arrive, when they ask where comments go or whether the bridge or the Chrome extension is working, or before troubleshooting any of it.
+user-invocable: false
 ---
 
-Run, with Bash:
+# Checking the comment bridge
+
+There is no command for this: the user does not check the bridge, you do. Run, with Bash:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/scripts/ctl.mjs" status

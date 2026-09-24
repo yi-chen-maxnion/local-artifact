@@ -148,7 +148,7 @@ function forgetToken() {
   lists = null;
 }
 
-/** What the overlay and `/comments` are told. Never the token itself. */
+/** What the overlay and `ctl.mjs status` are told. Never the token itself. */
 export function status() {
   const t = readToken();
   return {
@@ -423,7 +423,7 @@ export async function destinations(q = '') {
 
 // ---------------------------------------------------------------- sharing
 
-let lastShare = null; // { ok, at, label, error } - what `/comments` reports
+let lastShare = null; // { ok, at, label, error } - what `ctl.mjs status` reports
 
 /**
  * A page can ask the extension to share, and a page can be hostile. The panel's own guards -

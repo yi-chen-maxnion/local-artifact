@@ -687,7 +687,7 @@ test('previews, counters and seq survive a daemon restart', async () => {
 /**
  * A state file written before records lost their session holds one record per session that saw an
  * origin, so the same origin arrives several times over. A restart that kept them all would list
- * the origin twice in /comments and orphan the pins under every id but the one `previewFor`
+ * the origin twice in ctl.mjs status and orphan the pins under every id but the one `previewFor`
  * returns; the upgrade collapses them onto the most recently used id, whose pins are the ones
  * likeliest to still be on the page.
  */
