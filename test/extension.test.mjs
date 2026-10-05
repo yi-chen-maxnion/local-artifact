@@ -7,7 +7,7 @@ import { startBridge } from './helpers.mjs';
 /**
  * What the extension cannot import, and therefore holds a copy of.
  *
- * The service worker is a classic script and the README is prose: neither can read
+ * The service worker is a classic script and docs/REFERENCE.md is prose: neither can read
  * `lib/common.mjs`, and there is no build step to hand them anything. Where a copy drifts the
  * symptom is silence - a comment sent to nobody, an overlay that never appears - so the copies
  * are pinned here, in text and, where it is a function, in behaviour.
@@ -37,12 +37,12 @@ function fnSource(text, name) {
 const strip = (src) => src.replace(/^(?:const|let|var)\s+[\w$]+\s*=\s*/, '').replace(/;\s*$/, '');
 const asFunction = (src) => new Function(`return (${strip(src)});`)();
 
-test('the service worker and the README both speak to the default port', () => {
+test('the service worker and the reference doc both speak to the default port', () => {
   assert.equal(DEFAULT_PORT, 4517);
   const origin = `http://${HOST}:${DEFAULT_PORT}`;
-  // `LOCAL_ARTIFACT_PORT` moves the daemon and not the extension, which is a thing the README has
+  // `LOCAL_ARTIFACT_PORT` moves the daemon and not the extension, which is a thing the reference doc has
   // to say rather than a thing to fix: the worker is pinned to the bridge's exact origin.
-  for (const file of ['extension/background.js', 'README.md']) {
+  for (const file of ['extension/background.js', 'docs/REFERENCE.md']) {
     assert.ok(read(file).includes(origin), `${file} no longer contains ${origin} - the copies have drifted`);
   }
 });

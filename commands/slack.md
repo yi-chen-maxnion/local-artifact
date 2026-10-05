@@ -27,7 +27,7 @@ Then relay the result plainly.
 Known failures and what fixes them:
 
 - `no Slack app is configured` — nobody has filled in `slack-app.json` yet. It needs the client
-  id of a Slack app with PKCE enabled; the README section *Posting a comment to Slack* has the
+  id of a Slack app with PKCE enabled; the section *Posting a comment to Slack* in docs/REFERENCE.md has the
   one-time setup.
 - `this login link has expired` — the browser was left sitting on the Slack page for more than
   ten minutes. Run `/slack login` again.

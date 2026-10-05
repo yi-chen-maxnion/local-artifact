@@ -12,7 +12,7 @@ const session = resolveSession();
 /** One line about Slack wherever the bridge's state is reported. */
 function slackLine(s) {
   if (!s) return 'slack      (this bridge is too old to know)';
-  if (!s.configured) return 'slack      no app configured - see "Posting a comment to Slack" in README.md';
+  if (!s.configured) return 'slack      no app configured - see "Posting a comment to Slack" in docs/REFERENCE.md';
   if (!s.connected) return 'slack      not connected - run /slack login';
   const last = s.last?.at
     ? `  last ${s.last.ok ? `posted to ${s.last.label}` : `failed: ${s.last.error}`}`
