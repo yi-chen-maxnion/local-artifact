@@ -19,7 +19,7 @@ const BRIDGE = 'http://127.0.0.1:4517';
 // The version of the files this worker was started from. A constant rather than getManifest(),
 // because after a browser restart Chrome can report the new manifest while this worker still runs
 // the old script. scripts/ rewrites this line on release; test/ checks it against manifest.json.
-const BUILD = '0.1.0';
+const BUILD = '0.2.0';
 
 /**
  * This worker's lifetime, told apart from every other one's. It goes into each overlay it injects,
